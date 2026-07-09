@@ -19,3 +19,9 @@
 - Added project registry support and `/supervise projects` / `/supervise register`.
 - Verified Phase 2 build and tests; test suite is now 34 passing tests.
 - Restarted the local supervisor panel and verified `/api/register-project`, `/api/projects`, and refreshed status snapshots.
+- Started Phase 3: active project routing through a supervisor hub.
+- Added project activation with `/supervise activate <project-id>` / `/supervise use <project-id>` and `POST /api/activate-project`.
+- Added registration for another local project with `/supervise register <project-dir>` and `POST /api/register-project`.
+- Routed status, scan, worker state, instructions, command runs, approvals, and direct human instructions to the active project.
+- Verified Phase 3 with `npm run check`; test suite is now 35 passing tests.
+- Restarted the local supervisor panel on port 8791 and smoke-tested register, projects, activate, and active status APIs.

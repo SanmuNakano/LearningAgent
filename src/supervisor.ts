@@ -140,7 +140,11 @@ export type ProjectRegistryEntry = {
   id: string;
   name?: string;
   projectDir: string;
+  stateFile?: string;
   workerStateFile?: string;
+  workerInboxFile?: string;
+  workerOutboxFile?: string;
+  auditFile?: string;
   addedAt: string;
   lastSeenAt?: string;
 };
@@ -435,7 +439,11 @@ function normalizeProjectRegistry(raw: unknown): ProjectRegistry {
         id,
         name: optionalString(item.name),
         projectDir,
+        stateFile: optionalString(item.stateFile),
         workerStateFile: optionalString(item.workerStateFile),
+        workerInboxFile: optionalString(item.workerInboxFile),
+        workerOutboxFile: optionalString(item.workerOutboxFile),
+        auditFile: optionalString(item.auditFile),
         addedAt: optionalString(item.addedAt) ?? nowIso(),
         lastSeenAt: optionalString(item.lastSeenAt)
       });
@@ -841,8 +849,60 @@ export function normalizeSupervisorConfig(input: SupervisorConfig = {}): Require
   };
 }
 
+type NormalizedSupervisorConfig = ReturnType<typeof normalizeSupervisorConfig>;
+
+function projectEntryFromConfig(cfg: NormalizedSupervisorConfig, existing?: ProjectRegistryEntry, seenAt = nowIso()): ProjectRegistryEntry {
+  return {
+    id: cfg.projectId,
+    name: existing?.name ?? cfg.projectId,
+    projectDir: cfg.projectDir,
+    stateFile: cfg.stateFile,
+    workerStateFile: cfg.workerStateFile,
+    workerInboxFile: cfg.workerInboxFile,
+    workerOutboxFile: cfg.workerOutboxFile,
+    auditFile: cfg.auditFile,
+    addedAt: existing?.addedAt ?? seenAt,
+    lastSeenAt: seenAt
+  };
+}
+
+function configForRegistryEntry(
+  base: NormalizedSupervisorConfig,
+  entry: ProjectRegistryEntry,
+  overrides: SupervisorConfig = {}
+): SupervisorConfig {
+  return {
+    projectId: entry.id,
+    projectDir: entry.projectDir,
+    stateFile: entry.stateFile,
+    workerStateFile: entry.workerStateFile,
+    workerInboxFile: entry.workerInboxFile,
+    workerOutboxFile: entry.workerOutboxFile,
+    auditFile: entry.auditFile,
+    projectRegistryFile: base.projectRegistryFile,
+    defaultWorkerId: base.defaultWorkerId,
+    host: base.host,
+    port: base.port,
+    publicUrl: base.publicUrl,
+    token: base.token,
+    autoStartServer: false,
+    scanIntervalMs: base.scanIntervalMs,
+    staleAfterMs: base.staleAfterMs,
+    maxFiles: base.maxFiles,
+    maxHistory: base.maxHistory,
+    maxInstructions: base.maxInstructions,
+    maxTaskLogChars: base.maxTaskLogChars,
+    commandTimeoutMs: base.commandTimeoutMs,
+    watchedPorts: [...base.watchedPorts],
+    logFiles: [...base.logFiles],
+    ignoreDirs: [...base.ignoreDirs],
+    allowedCommands: base.allowedCommands,
+    ...overrides
+  };
+}
+
 export class ProjectSupervisor {
-  private readonly cfg: ReturnType<typeof normalizeSupervisorConfig>;
+  private readonly cfg: NormalizedSupervisorConfig;
   private readonly logger: Logger;
   private server: ReturnType<typeof createServer> | null = null;
   private scanTimer: NodeJS.Timeout | null = null;
@@ -911,29 +971,39 @@ export class ProjectSupervisor {
   }
 
   async registerCurrentProject(): Promise<ProjectRegistryEntry> {
+    return await this.registerProject(this.cfg.projectDir, this.cfg.projectId);
+  }
+
+  async registerProject(projectDir: string, projectId?: string): Promise<ProjectRegistryEntry> {
+    const normalized = normalizeSupervisorConfig(configForRegistryEntry(this.cfg, {
+      id: projectId?.trim() || path.basename(projectDir).toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "project",
+      projectDir,
+      addedAt: nowIso()
+    }));
+    if (!await pathExists(normalized.projectDir)) {
+      throw new Error(`Project directory does not exist: ${normalized.projectDir}`);
+    }
     const registry = await this.readProjectRegistry();
     const now = nowIso();
-    const entry: ProjectRegistryEntry = {
-      id: this.cfg.projectId,
-      name: this.cfg.projectId,
-      projectDir: this.cfg.projectDir,
-      workerStateFile: this.cfg.workerStateFile,
-      addedAt: now,
-      lastSeenAt: now
-    };
+    const existing = registry.projects.find((project) => project.id === normalized.projectId);
+    const entry = projectEntryFromConfig(normalized, existing, now);
     const existingIndex = registry.projects.findIndex((project) => project.id === entry.id);
     if (existingIndex >= 0) {
       const existing = registry.projects[existingIndex];
       registry.projects[existingIndex] = {
         ...existing,
         projectDir: entry.projectDir,
+        stateFile: entry.stateFile,
         workerStateFile: entry.workerStateFile,
+        workerInboxFile: entry.workerInboxFile,
+        workerOutboxFile: entry.workerOutboxFile,
+        auditFile: entry.auditFile,
         lastSeenAt: now
       };
     } else {
       registry.projects.push(entry);
     }
-    registry.activeProjectId = this.cfg.projectId;
+    registry.activeProjectId = entry.id;
     await writeProjectRegistry(this.cfg.projectRegistryFile, registry);
     await this.audit("project_registered", entry);
     return existingIndex >= 0 ? registry.projects[existingIndex] : entry;
@@ -1334,6 +1404,278 @@ export class ProjectSupervisor {
   }
 }
 
+export class ProjectSupervisorHub {
+  private readonly root: ProjectSupervisor;
+  private readonly logger: Logger;
+  private readonly supervisors = new Map<string, ProjectSupervisor>();
+  private server: ReturnType<typeof createServer> | null = null;
+  private scanTimer: NodeJS.Timeout | null = null;
+  private token = "";
+
+  constructor(config: SupervisorConfig = {}, logger: Logger = {}) {
+    this.root = new ProjectSupervisor(config, logger);
+    this.logger = logger;
+  }
+
+  getRootSupervisor(): ProjectSupervisor {
+    return this.root;
+  }
+
+  getConfig(): NormalizedSupervisorConfig {
+    return this.root.getConfig();
+  }
+
+  async ensureStarted(): Promise<void> {
+    this.token = await this.root.ensureToken();
+    if (this.root.getConfig().autoStartServer) await this.startServer();
+    if (!this.scanTimer) {
+      await this.scan();
+      this.scanTimer = setInterval(() => {
+        this.scan().catch((error) => this.logger.warn?.(`project-supervisor hub scan failed: ${String(error)}`));
+      }, this.root.getConfig().scanIntervalMs);
+    }
+  }
+
+  async stop(): Promise<void> {
+    if (this.scanTimer) clearInterval(this.scanTimer);
+    this.scanTimer = null;
+    if (this.server) {
+      const server = this.server;
+      this.server = null;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    await Promise.all([...this.supervisors.values()].map((supervisor) => supervisor.stop()));
+    await this.root.stop();
+  }
+
+  getPanelUrl(): string {
+    return this.root.getPanelUrl();
+  }
+
+  async readProjectRegistry(): Promise<ProjectRegistry> {
+    return await this.root.readProjectRegistry();
+  }
+
+  async registerCurrentProject(): Promise<ProjectRegistryEntry> {
+    this.supervisors.delete(this.root.getConfig().projectId);
+    return await this.root.registerCurrentProject();
+  }
+
+  async registerProject(projectDir: string, projectId?: string): Promise<ProjectRegistryEntry> {
+    const project = await this.root.registerProject(projectDir, projectId);
+    this.supervisors.delete(project.id);
+    return project;
+  }
+
+  async activateProject(id: string): Promise<ProjectRegistryEntry> {
+    const projectId = id.trim();
+    if (!projectId) throw new Error("Project id is required.");
+    const registry = await this.readProjectRegistry();
+    const project = registry.projects.find((entry) => entry.id === projectId);
+    if (!project) throw new Error(`Project "${projectId}" is not registered.`);
+    project.lastSeenAt = nowIso();
+    registry.activeProjectId = project.id;
+    await writeProjectRegistry(this.root.getConfig().projectRegistryFile, registry);
+    await appendJsonLine(this.root.getConfig().auditFile, {
+      event: "project_activated",
+      at: nowIso(),
+      payload: project
+    });
+    return project;
+  }
+
+  async getActiveProjectEntry(): Promise<ProjectRegistryEntry | undefined> {
+    const registry = await this.readProjectRegistry();
+    if (!registry.activeProjectId) return undefined;
+    return registry.projects.find((project) => project.id === registry.activeProjectId);
+  }
+
+  async getActiveSupervisor(): Promise<ProjectSupervisor> {
+    const entry = await this.getActiveProjectEntry();
+    const rootCfg = this.root.getConfig();
+    if (!entry) return this.root;
+    if (entry.id === rootCfg.projectId && path.resolve(entry.projectDir) === rootCfg.projectDir) return this.root;
+    const existing = this.supervisors.get(entry.id);
+    if (existing) return existing;
+    const token = this.token || await this.root.ensureToken();
+    const supervisor = new ProjectSupervisor(configForRegistryEntry(rootCfg, entry, { token }), this.logger);
+    this.supervisors.set(entry.id, supervisor);
+    return supervisor;
+  }
+
+  async scan(): Promise<SupervisorSnapshot> {
+    return await (await this.getActiveSupervisor()).scan();
+  }
+
+  async latest(): Promise<SupervisorSnapshot> {
+    return await (await this.getActiveSupervisor()).latest();
+  }
+
+  async getWorkerState(): Promise<WorkerState> {
+    return await (await this.getActiveSupervisor()).getWorkerState();
+  }
+
+  async listInstructions(status?: InstructionStatus): Promise<SupervisorInstruction[]> {
+    return await (await this.getActiveSupervisor()).listInstructions(status);
+  }
+
+  async createInstruction(params: Parameters<ProjectSupervisor["createInstruction"]>[0]): Promise<SupervisorInstruction> {
+    return await (await this.getActiveSupervisor()).createInstruction(params);
+  }
+
+  async approveInstruction(id: string): Promise<SupervisorInstruction> {
+    return await (await this.getActiveSupervisor()).approveInstruction(id);
+  }
+
+  async rejectInstruction(id: string, reason?: string): Promise<SupervisorInstruction> {
+    return await (await this.getActiveSupervisor()).rejectInstruction(id, reason);
+  }
+
+  async runAllowedCommand(name: string): Promise<TaskRecord> {
+    return await (await this.getActiveSupervisor()).runAllowedCommand(name);
+  }
+
+  async renderTextStatus(forceScan = false): Promise<string> {
+    return await (await this.getActiveSupervisor()).renderTextStatus(forceScan);
+  }
+
+  async renderWorkerText(): Promise<string> {
+    return await (await this.getActiveSupervisor()).renderWorkerText();
+  }
+
+  async renderInstructionsText(status?: InstructionStatus): Promise<string> {
+    return await (await this.getActiveSupervisor()).renderInstructionsText(status);
+  }
+
+  async renderProjectsText(): Promise<string> {
+    return await this.root.renderProjectsText();
+  }
+
+  async startServer(): Promise<void> {
+    if (this.server) return;
+    const token = await this.root.ensureToken();
+    this.token = token;
+    this.server = createServer((req, res) => {
+      this.handleHttp(req, res, token).catch((error) => {
+        res.statusCode = 500;
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        res.end(JSON.stringify({ error: String(error) }));
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      this.server?.once("error", reject);
+      this.server?.listen(this.root.getConfig().port, this.root.getConfig().host, () => resolve());
+    });
+    this.logger.info?.(`project-supervisor panel: ${this.getPanelUrl()}`);
+  }
+
+  async handleHttp(req: IncomingMessage, res: ServerResponse, token = this.token): Promise<boolean> {
+    const parsed = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    if (parsed.pathname.startsWith("/plugins/project-supervisor")) {
+      parsed.pathname = parsed.pathname.replace(/^\/plugins\/project-supervisor/, "") || "/";
+    }
+    if (!this.isAuthorized(req, parsed, token)) {
+      json(res, 401, { error: "unauthorized" });
+      return true;
+    }
+    if (req.method === "GET" && parsed.pathname === "/") {
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.end(renderDashboardHtml(token));
+      return true;
+    }
+    if (req.method === "GET" && parsed.pathname === "/api/status") {
+      const active = await this.getActiveSupervisor();
+      json(res, 200, {
+        snapshot: await active.latest(),
+        commands: Object.keys(active.getConfig().allowedCommands),
+        panelUrl: this.getPanelUrl(),
+        registry: await this.readProjectRegistry()
+      });
+      return true;
+    }
+    if (req.method === "GET" && parsed.pathname === "/api/worker") {
+      json(res, 200, { worker: await this.getWorkerState() });
+      return true;
+    }
+    if (req.method === "GET" && parsed.pathname === "/api/instructions") {
+      const status = parsed.searchParams.get("status");
+      const parsedStatus: InstructionStatus | undefined =
+        status === "pending" || status === "approved" || status === "rejected" || status === "dispatched" ? status : undefined;
+      json(res, 200, { instructions: await this.listInstructions(parsedStatus) });
+      return true;
+    }
+    if (req.method === "GET" && parsed.pathname === "/api/projects") {
+      json(res, 200, { registry: await this.readProjectRegistry() });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/scan") {
+      json(res, 200, { snapshot: await this.scan(), registry: await this.readProjectRegistry() });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/register-project") {
+      const body = await readBodyJson(req);
+      const projectDir = isRecord(body) && typeof body.projectDir === "string" ? body.projectDir : "";
+      const projectId = isRecord(body) && typeof body.projectId === "string" ? body.projectId : undefined;
+      const project = projectDir ? await this.registerProject(projectDir, projectId) : await this.registerCurrentProject();
+      json(res, 200, { project, registry: await this.readProjectRegistry() });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/activate-project") {
+      const body = await readBodyJson(req);
+      const id = isRecord(body) && typeof body.id === "string"
+        ? body.id
+        : isRecord(body) && typeof body.projectId === "string"
+          ? body.projectId
+          : "";
+      const project = await this.activateProject(id);
+      json(res, 200, { project, registry: await this.readProjectRegistry() });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/run") {
+      const body = await readBodyJson(req);
+      const command = isRecord(body) && typeof body.command === "string" ? body.command : "";
+      json(res, 200, { task: await this.runAllowedCommand(command) });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/propose") {
+      const body = await readBodyJson(req);
+      const instruction = isRecord(body) && typeof body.instruction === "string" ? body.instruction : "";
+      json(res, 200, { instruction: await this.createInstruction({ instruction, createdBy: "supervisor", source: "http" }) });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/tell") {
+      const body = await readBodyJson(req);
+      const instruction = isRecord(body) && typeof body.instruction === "string" ? body.instruction : "";
+      json(res, 200, { instruction: await this.createInstruction({ instruction, createdBy: "human", source: "http", approve: true }) });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/approve") {
+      const body = await readBodyJson(req);
+      const id = isRecord(body) && typeof body.id === "string" ? body.id : "";
+      json(res, 200, { instruction: await this.approveInstruction(id) });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/reject") {
+      const body = await readBodyJson(req);
+      const id = isRecord(body) && typeof body.id === "string" ? body.id : "";
+      const reason = isRecord(body) && typeof body.reason === "string" ? body.reason : undefined;
+      json(res, 200, { instruction: await this.rejectInstruction(id, reason) });
+      return true;
+    }
+    json(res, 404, { error: "not found" });
+    return true;
+  }
+
+  private isAuthorized(req: IncomingMessage, parsed: URL, token: string): boolean {
+    if (!token) return true;
+    const queryToken = parsed.searchParams.get("token");
+    if (queryToken === token) return true;
+    const auth = req.headers.authorization;
+    return auth === `Bearer ${token}`;
+  }
+}
+
 async function readBodyJson(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(Buffer.from(chunk));
@@ -1383,6 +1725,8 @@ function renderDashboardHtml(token: string): string {
       </div>
       <div class="toolbar">
         <button onclick="refresh(true)">Refresh</button>
+        <select id="project"></select>
+        <button onclick="activateProject()">Use</button>
         <select id="command"></select>
         <button onclick="runCommand()">Run</button>
       </div>
@@ -1412,9 +1756,26 @@ function renderDashboardHtml(token: string): string {
     function rows(items, cols) {
       return "<tbody>" + items.map(item => "<tr>" + cols.map(col => "<td>" + String(col(item) ?? "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])) + "</td>").join("") + "</tr>").join("") + "</tbody>";
     }
+    function updateProjects(registry) {
+      const select = document.getElementById("project");
+      if (!registry || !Array.isArray(registry.projects)) {
+        select.innerHTML = "";
+        return;
+      }
+      const current = select.value || registry.activeProjectId || "";
+      select.innerHTML = "";
+      for (const project of registry.projects) {
+        const opt = document.createElement("option");
+        opt.value = project.id;
+        opt.textContent = project.id + (project.id === registry.activeProjectId ? " *" : "");
+        select.appendChild(opt);
+      }
+      select.value = registry.projects.some(p => p.id === current) ? current : (registry.activeProjectId || "");
+    }
     async function refresh(force) {
       const data = force ? await api("/api/scan", { method: "POST", body: "{}" }) : await api("/api/status");
       const s = data.snapshot;
+      updateProjects(data.registry || s.projects);
       document.getElementById("sub").textContent = s.projectDir + " | " + s.scannedAt;
       const h = document.getElementById("health");
       h.textContent = s.health.toUpperCase();
@@ -1438,17 +1799,26 @@ function renderDashboardHtml(token: string): string {
       document.getElementById("files").innerHTML = rows(s.fileScan.recent, [x => x.path, x => x.modifiedAt, x => x.size + " B"]);
       document.getElementById("taskTable").innerHTML = rows(s.tasks.slice(-12).reverse(), [x => x.name, x => x.status, x => x.startedAt, x => (x.log || "").slice(-240)]);
       const select = document.getElementById("command");
-      if (data.commands && select.children.length === 0) {
+      if (data.commands) {
+        const current = select.value;
+        select.innerHTML = "";
         for (const command of data.commands) {
           const opt = document.createElement("option");
           opt.value = command; opt.textContent = command; select.appendChild(opt);
         }
+        if (data.commands.includes(current)) select.value = current;
       }
     }
     async function runCommand() {
       const command = document.getElementById("command").value;
       await api("/api/run", { method: "POST", body: JSON.stringify({ command }) });
       await refresh(false);
+    }
+    async function activateProject() {
+      const id = document.getElementById("project").value;
+      if (!id) return;
+      await api("/api/activate-project", { method: "POST", body: JSON.stringify({ id }) });
+      await refresh(true);
     }
     refresh(false).catch(err => document.getElementById("summary").textContent = err.message);
     setInterval(() => refresh(false).catch(() => {}), 5000);
@@ -1496,14 +1866,14 @@ function configFromPluginApi(api: any): SupervisorConfig {
   };
 }
 
-let singleton: ProjectSupervisor | null = null;
+let singleton: ProjectSupervisorHub | null = null;
 
-export function getProjectSupervisorForTests(): ProjectSupervisor | null {
+export function getProjectSupervisorForTests(): ProjectSupervisorHub | null {
   return singleton;
 }
 
 export function registerProjectSupervisor(api: any): void {
-  const supervisor = new ProjectSupervisor(configFromPluginApi(api), api.logger ?? {});
+  const supervisor = new ProjectSupervisorHub(configFromPluginApi(api), api.logger ?? {});
   singleton = supervisor;
 
   api.registerService?.({
@@ -1546,9 +1916,16 @@ export function registerProjectSupervisor(api: any): void {
       if (/^ai$/i.test(args)) return { text: await supervisor.renderWorkerText() };
       if (/^(pending|instructions)$/i.test(args)) return { text: await supervisor.renderInstructionsText() };
       if (/^projects$/i.test(args)) return { text: await supervisor.renderProjectsText() };
-      if (/^(register|register-project)$/i.test(args)) {
-        const project = await supervisor.registerCurrentProject();
+      const registerMatch = /^(register|register-project)(?:\s+([\s\S]+))?$/i.exec(args);
+      if (registerMatch) {
+        const projectDir = registerMatch[2]?.trim();
+        const project = projectDir ? await supervisor.registerProject(projectDir) : await supervisor.registerCurrentProject();
         return { text: `Registered project ${project.id}:\n${project.projectDir}` };
+      }
+      const activateMatch = /^(activate|use)\s+([a-zA-Z0-9_-]+)$/i.exec(args);
+      if (activateMatch) {
+        const project = await supervisor.activateProject(activateMatch[2]);
+        return { text: `Active project is now ${project.id}:\n${project.projectDir}` };
       }
       if (/^(scan|refresh)$/i.test(args)) return { text: await supervisor.renderTextStatus(true) };
       if (/^(url|panel)$/i.test(args)) return { text: `Project Supervisor panel:\n${supervisor.getPanelUrl()}` };
@@ -1594,6 +1971,8 @@ export function registerProjectSupervisor(api: any): void {
           "/supervise ai",
           "/supervise projects",
           "/supervise register",
+          "/supervise register <project-dir>",
+          "/supervise activate <project-id>",
           "/supervise scan",
           "/supervise propose",
           "/supervise propose <instruction>",
@@ -1603,7 +1982,7 @@ export function registerProjectSupervisor(api: any): void {
           "/supervise url",
           "/supervise run build",
           "/supervise run test",
-          `Allowed commands: ${Object.keys(supervisor.getConfig().allowedCommands).join(", ")}`
+          `Allowed commands: ${Object.keys((await supervisor.getActiveSupervisor()).getConfig().allowedCommands).join(", ")}`
         ].join("\n")
       };
     }
@@ -1615,7 +1994,7 @@ async function startCli(): Promise<void> {
   if (!args.includes("--serve")) return;
   const projectIndex = args.indexOf("--project");
   const portIndex = args.indexOf("--port");
-  const supervisor = new ProjectSupervisor({
+  const supervisor = new ProjectSupervisorHub({
     projectDir: projectIndex >= 0 ? args[projectIndex + 1] : undefined,
     port: portIndex >= 0 ? Number(args[portIndex + 1]) : undefined,
     host: "0.0.0.0"

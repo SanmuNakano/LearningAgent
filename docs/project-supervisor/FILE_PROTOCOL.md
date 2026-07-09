@@ -122,13 +122,19 @@ Example:
       "id": "openclaw-plugins",
       "name": "openclaw-plugins",
       "projectDir": "D:\\learn\\openclaw-plugins",
+      "stateFile": "D:\\learn\\openclaw-plugins\\.project-supervisor\\state.json",
       "workerStateFile": "D:\\learn\\openclaw-plugins\\.project-supervisor\\worker-state.json",
+      "workerInboxFile": "D:\\learn\\openclaw-plugins\\.project-supervisor\\inbox.jsonl",
+      "workerOutboxFile": "D:\\learn\\openclaw-plugins\\.project-supervisor\\outbox.jsonl",
+      "auditFile": "D:\\learn\\openclaw-plugins\\.project-supervisor\\audit.jsonl",
       "addedAt": "2026-07-09T11:30:00.000Z",
       "lastSeenAt": "2026-07-09T11:30:00.000Z"
     }
   ]
 }
 ```
+
+`activeProjectId` is the routing switch. Status, scan, command runs, approvals, and direct instructions are applied to that active project. Each project keeps its own `.project-supervisor/state.json`, inbox, outbox, and audit log.
 
 ## Mobile Commands
 
@@ -138,9 +144,20 @@ The OpenClaw command surface maps to the protocol:
 - `/supervise ai` shows detailed worker heartbeat.
 - `/supervise projects` lists registered projects.
 - `/supervise register` registers the current project in the central registry.
+- `/supervise register <project-dir>` registers another local project and makes it active.
+- `/supervise activate <project-id>` or `/supervise use <project-id>` switches the active project.
 - `/supervise propose` shows recommended next actions.
 - `/supervise propose <instruction>` creates a pending instruction.
 - `/supervise approve <id>` approves and dispatches a pending instruction.
 - `/supervise reject <id>` rejects a pending instruction.
 - `/supervise tell <instruction>` immediately dispatches a human-approved instruction.
 - `/supervise pending` lists recent supervisor instructions.
+
+## HTTP API
+
+The dashboard and phone gateway use the same active project routing:
+
+- `GET /api/projects` returns the registry.
+- `POST /api/register-project` with optional `{ "projectDir": "...", "projectId": "..." }` registers a project.
+- `POST /api/activate-project` with `{ "id": "project-id" }` switches the active project.
+- `GET /api/status`, `POST /api/scan`, `GET /api/worker`, `GET /api/instructions`, `POST /api/run`, `POST /api/propose`, `POST /api/tell`, `POST /api/approve`, and `POST /api/reject` operate on the active project.

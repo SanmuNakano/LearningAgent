@@ -2,7 +2,7 @@ import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/pro
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
-import { ProjectSupervisor, normalizeSupervisorConfig } from "./supervisor.js";
+import { ProjectSupervisor, ProjectSupervisorHub, normalizeSupervisorConfig } from "./supervisor.js";
 
 async function makeProject(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "project-supervisor-"));
@@ -240,9 +240,59 @@ describe("ProjectSupervisor", () => {
       expect(project.id).toBe("test-project");
       expect(registry.activeProjectId).toBe("test-project");
       expect(registry.projects).toHaveLength(1);
+      expect(registry.projects[0].stateFile).toContain("state.json");
+      expect(registry.projects[0].workerInboxFile).toContain("inbox.jsonl");
+      expect(registry.projects[0].workerOutboxFile).toContain("outbox.jsonl");
       expect(text).toContain("test-project (active)");
     } finally {
       await removeProject(projectDir);
+    }
+  });
+
+  it("routes scans and instructions to the active project through the hub", async () => {
+    const projectA = await makeProject();
+    const projectB = await makeProject();
+    try {
+      const registryFile = join(projectA, ".central-supervisor", "projects.json");
+      const supervisorDirB = join(projectB, ".project-supervisor");
+      await mkdir(supervisorDirB, { recursive: true });
+      await writeFile(join(supervisorDirB, "worker-state.json"), JSON.stringify({
+        projectId: "project-b",
+        workerId: "codex-b",
+        status: "working",
+        currentStep: "Building project B"
+      }), "utf-8");
+
+      const hub = new ProjectSupervisorHub({
+        projectId: "project-a",
+        projectDir: projectA,
+        stateFile: join(projectA, ".project-supervisor", "state.json"),
+        projectRegistryFile: registryFile,
+        autoStartServer: false,
+        maxFiles: 100
+      });
+
+      await hub.registerCurrentProject();
+      await hub.registerProject(projectB, "project-b");
+      await hub.activateProject("project-b");
+
+      const snapshot = await hub.scan();
+      const instruction = await hub.createInstruction({
+        instruction: "Continue project B and report status.",
+        createdBy: "human",
+        source: "mobile",
+        approve: true
+      });
+      const inbox = await readFile(join(supervisorDirB, "inbox.jsonl"), "utf-8");
+
+      expect(snapshot.projectDir).toBe(projectB);
+      expect(snapshot.worker.workerId).toBe("codex-b");
+      expect(snapshot.worker.currentStep).toBe("Building project B");
+      expect(instruction.projectId).toBe("project-b");
+      expect(inbox).toContain("Continue project B and report status.");
+    } finally {
+      await removeProject(projectA);
+      await removeProject(projectB);
     }
   });
 });

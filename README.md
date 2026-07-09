@@ -12,6 +12,7 @@ Default local repository:
 
 - `D:\learn\openclaw-plugins`
 - Supervisor state: `D:\learn\openclaw-plugins\.project-supervisor\state.json`
+- Project registry: `D:\learn\.project-supervisor\projects.json`
 - Generated state, logs, dependencies, and build output are ignored by Git.
 
 What it monitors:
@@ -36,6 +37,10 @@ OpenClaw commands:
 ```text
 /supervise status
 /supervise ai
+/supervise projects
+/supervise register
+/supervise register D:\learn\another-project
+/supervise activate openclaw-plugins
 /supervise scan
 /supervise propose
 /supervise propose <instruction>
