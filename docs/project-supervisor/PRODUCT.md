@@ -274,6 +274,7 @@ Required:
 - Recommend commit/push/review timing.
 - Track whether worker AI followed approved instructions.
 - Promote stale worker progress, repeated failures, and git sync state into structured supervision signals.
+- Convert actionable signals into deduplicated notifications that the human can acknowledge.
 
 ## Open Decisions
 

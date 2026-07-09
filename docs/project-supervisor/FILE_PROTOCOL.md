@@ -163,6 +163,9 @@ The OpenClaw command surface maps to the protocol:
 - `/supervise status` shows project and worker state.
 - `/supervise ai` shows detailed worker heartbeat.
 - `/supervise review` shows active project, worker state, next actions, and pending instructions.
+- `/supervise alerts` shows open supervisor alerts.
+- `/supervise ack alerts` acknowledges all open supervisor alerts.
+- `/supervise ack <alert-id-or-signal-id>` acknowledges one supervisor alert.
 - `/supervise projects` lists registered projects.
 - `/supervise register` registers the current project in the central registry.
 - `/supervise register <project-dir>` registers another local project and makes it active.
@@ -183,6 +186,9 @@ The dashboard and phone gateway use the same active project routing:
 
 - `GET /api/projects` returns the registry.
 - `GET /api/overview` returns the active project, latest snapshot, pending instructions, recent instructions, next actions, allowed commands, registry, and panel URL.
+- `GET /api/notifications?status=open` returns supervisor alerts.
+- `POST /api/ack-notification` with `{ "id": "..." }` acknowledges one alert.
+- `POST /api/ack-notifications` acknowledges all open alerts for the active project.
 - `POST /api/register-project` with optional `{ "projectDir": "...", "projectId": "..." }` registers a project.
 - `POST /api/activate-project` with `{ "id": "project-id" }` switches the active project.
 - `POST /api/approve-latest` approves the newest pending instruction for the active project.
@@ -218,3 +224,15 @@ Current signal examples:
 - `git-behind-upstream`
 
 Critical signals promote overall project health to `blocked`. Watch signals promote an otherwise healthy project to `watch`.
+
+## Notifications
+
+Signals with severity `watch` or `critical` create notifications. Informational signals stay visible in status and overview but do not alert.
+
+Notification statuses:
+
+- `open`: needs human attention.
+- `acknowledged`: a human has seen it.
+- `resolved`: the underlying signal disappeared before acknowledgement.
+
+Notifications are deduplicated by `projectId + signalId`. After acknowledgement, the same signal will not reopen until the configured cooldown expires. Default cooldown is 30 minutes.

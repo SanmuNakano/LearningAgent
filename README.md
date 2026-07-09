@@ -39,6 +39,9 @@ OpenClaw commands:
 /supervise status
 /supervise ai
 /supervise review
+/supervise alerts
+/supervise ack alerts
+/supervise ack <alert-id-or-signal-id>
 /supervise projects
 /supervise register
 /supervise register D:\learn\another-project

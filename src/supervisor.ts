@@ -48,6 +48,8 @@ export type SupervisorConfig = {
   maxInstructions?: number;
   maxTaskLogChars?: number;
   commandTimeoutMs?: number;
+  notificationCooldownMs?: number;
+  maxNotifications?: number;
   watchedPorts?: number[];
   logFiles?: string[];
   ignoreDirs?: string[];
@@ -186,6 +188,27 @@ export type SupervisionSignal = {
   command?: string;
 };
 
+export type SupervisorNotificationStatus = "open" | "acknowledged" | "resolved";
+
+export type SupervisorNotification = {
+  id: string;
+  projectId: string;
+  signalId: string;
+  severity: "watch" | "critical";
+  title: string;
+  detail: string;
+  command?: string;
+  status: SupervisorNotificationStatus;
+  createdAt: string;
+  updatedAt: string;
+  lastSeenAt: string;
+  occurrenceCount: number;
+  sourceSnapshotId?: string;
+  acknowledgedAt?: string;
+  acknowledgedBy?: string;
+  resolvedAt?: string;
+};
+
 export type SupervisorSnapshot = {
   id: string;
   projectDir: string;
@@ -215,6 +238,7 @@ export type SupervisorOverview = {
   recentInstructions: SupervisorInstruction[];
   nextActions: SupervisorNextAction[];
   signals: SupervisionSignal[];
+  notifications: SupervisorNotification[];
   panelUrl: string;
 };
 
@@ -223,6 +247,7 @@ type SupervisorState = {
   snapshots: SupervisorSnapshot[];
   tasks: TaskRecord[];
   instructions: SupervisorInstruction[];
+  notifications: SupervisorNotification[];
 };
 
 const DEFAULT_PROJECT_DIR = process.env.OPENCLAW_SUPERVISOR_PROJECT ?? "D:\\learn\\openclaw-plugins";
@@ -232,8 +257,10 @@ const DEFAULT_STALE_AFTER_MS = 4 * 60 * 60_000;
 const DEFAULT_MAX_FILES = 8_000;
 const DEFAULT_MAX_HISTORY = 100;
 const DEFAULT_MAX_INSTRUCTIONS = 200;
+const DEFAULT_MAX_NOTIFICATIONS = 200;
 const DEFAULT_MAX_TASK_LOG_CHARS = 80_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_NOTIFICATION_COOLDOWN_MS = 30 * 60_000;
 
 const DEFAULT_IGNORES = new Set([
   ".git",
@@ -593,12 +620,13 @@ async function readWorkerState(cfg: ReturnType<typeof normalizeSupervisorConfig>
 }
 
 function normalizeState(raw: unknown): SupervisorState {
-  if (!isRecord(raw)) return { snapshots: [], tasks: [], instructions: [] };
+  if (!isRecord(raw)) return { snapshots: [], tasks: [], instructions: [], notifications: [] };
   return {
     token: typeof raw.token === "string" ? raw.token : undefined,
     snapshots: Array.isArray(raw.snapshots) ? raw.snapshots as SupervisorSnapshot[] : [],
     tasks: Array.isArray(raw.tasks) ? raw.tasks as TaskRecord[] : [],
-    instructions: Array.isArray(raw.instructions) ? raw.instructions as SupervisorInstruction[] : []
+    instructions: Array.isArray(raw.instructions) ? raw.instructions as SupervisorInstruction[] : [],
+    notifications: Array.isArray(raw.notifications) ? raw.notifications as SupervisorNotification[] : []
   };
 }
 
@@ -888,6 +916,84 @@ function buildSupervisionSignals(params: {
   return signals.slice(0, 10);
 }
 
+function updateNotificationsFromSignals(params: {
+  projectId: string;
+  snapshotId: string;
+  existing: SupervisorNotification[];
+  signals: SupervisionSignal[];
+  cooldownMs: number;
+  maxNotifications: number;
+  now?: string;
+}): SupervisorNotification[] {
+  const now = params.now ?? nowIso();
+  const nowMs = Date.parse(now);
+  const activeSignals = params.signals.filter((signal): signal is SupervisionSignal & { severity: "watch" | "critical" } => {
+    return signal.severity === "watch" || signal.severity === "critical";
+  });
+  const activeKeys = new Set(activeSignals.map((signal) => `${params.projectId}:${signal.id}`));
+  const out = params.existing.map((notification) => ({ ...notification }));
+  const byKey = new Map<string, SupervisorNotification>();
+
+  for (const notification of out) {
+    byKey.set(`${notification.projectId}:${notification.signalId}`, notification);
+  }
+
+  for (const signal of activeSignals) {
+    const key = `${params.projectId}:${signal.id}`;
+    const existing = byKey.get(key);
+    if (!existing) {
+      out.push({
+        id: toId(key),
+        projectId: params.projectId,
+        signalId: signal.id,
+        severity: signal.severity,
+        title: signal.title,
+        detail: signal.detail,
+        command: signal.command,
+        status: "open",
+        createdAt: now,
+        updatedAt: now,
+        lastSeenAt: now,
+        occurrenceCount: 1,
+        sourceSnapshotId: params.snapshotId
+      });
+      continue;
+    }
+
+    const cooldownExpired = nowMs - Date.parse(existing.updatedAt) >= params.cooldownMs;
+    const shouldOpen = existing.status === "open" || cooldownExpired;
+    existing.severity = signal.severity;
+    existing.title = signal.title;
+    existing.detail = signal.detail;
+    existing.command = signal.command;
+    existing.lastSeenAt = now;
+    existing.sourceSnapshotId = params.snapshotId;
+    existing.occurrenceCount = (existing.occurrenceCount || 0) + 1;
+    if (shouldOpen) {
+      existing.status = "open";
+      existing.updatedAt = now;
+      existing.resolvedAt = undefined;
+      if (cooldownExpired) {
+        existing.acknowledgedAt = undefined;
+        existing.acknowledgedBy = undefined;
+      }
+    }
+  }
+
+  for (const notification of out) {
+    const key = `${notification.projectId}:${notification.signalId}`;
+    if (notification.projectId === params.projectId && notification.status === "open" && !activeKeys.has(key)) {
+      notification.status = "resolved";
+      notification.resolvedAt = now;
+      notification.updatedAt = now;
+    }
+  }
+
+  return out
+    .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
+    .slice(-params.maxNotifications);
+}
+
 function combineHealth(projectHealth: SupervisorHealth, worker: WorkerState, instructions: SupervisorInstruction[]): SupervisorHealth {
   if (projectHealth === "blocked" || worker.status === "stuck") return "blocked";
   if (worker.source === "invalid") return "blocked";
@@ -1047,8 +1153,10 @@ export function normalizeSupervisorConfig(input: SupervisorConfig = {}): Require
     maxFiles: parsePositiveInt(input.maxFiles, DEFAULT_MAX_FILES),
     maxHistory: parsePositiveInt(input.maxHistory, DEFAULT_MAX_HISTORY),
     maxInstructions: parsePositiveInt(input.maxInstructions, DEFAULT_MAX_INSTRUCTIONS),
+    maxNotifications: parsePositiveInt(input.maxNotifications, DEFAULT_MAX_NOTIFICATIONS),
     maxTaskLogChars: parsePositiveInt(input.maxTaskLogChars, DEFAULT_MAX_TASK_LOG_CHARS),
     commandTimeoutMs: parsePositiveInt(input.commandTimeoutMs, DEFAULT_COMMAND_TIMEOUT_MS),
+    notificationCooldownMs: parsePositiveInt(input.notificationCooldownMs, DEFAULT_NOTIFICATION_COOLDOWN_MS),
     watchedPorts: Array.isArray(input.watchedPorts) ? input.watchedPorts.filter((p) => Number.isInteger(p) && p > 0 && p < 65536) : [],
     logFiles: Array.isArray(input.logFiles) ? input.logFiles.filter((p) => typeof p === "string" && p.trim()).slice(0, 8) : [],
     ignoreDirs: Array.isArray(input.ignoreDirs) ? input.ignoreDirs.filter((p) => typeof p === "string" && p.trim()) : [],
@@ -1098,8 +1206,10 @@ function configForRegistryEntry(
     maxFiles: base.maxFiles,
     maxHistory: base.maxHistory,
     maxInstructions: base.maxInstructions,
+    maxNotifications: base.maxNotifications,
     maxTaskLogChars: base.maxTaskLogChars,
     commandTimeoutMs: base.commandTimeoutMs,
+    notificationCooldownMs: base.notificationCooldownMs,
     watchedPorts: [...base.watchedPorts],
     logFiles: [...base.logFiles],
     ignoreDirs: [...base.ignoreDirs],
@@ -1169,6 +1279,7 @@ export class ProjectSupervisor {
     state.snapshots = state.snapshots.slice(-this.cfg.maxHistory);
     state.tasks = state.tasks.slice(-this.cfg.maxHistory);
     state.instructions = state.instructions.slice(-this.cfg.maxInstructions);
+    state.notifications = state.notifications.slice(-this.cfg.maxNotifications);
     if (this.token) state.token = this.token;
     await writeJsonFile(this.cfg.stateFile, state);
   }
@@ -1273,6 +1384,15 @@ export class ProjectSupervisor {
     state.snapshots.push(snapshot);
     state.tasks = tasks.filter((task, index, list) => list.findIndex((other) => other.id === task.id) === index).slice(-this.cfg.maxHistory);
     state.instructions = instructions;
+    state.notifications = updateNotificationsFromSignals({
+      projectId: this.cfg.projectId,
+      snapshotId: snapshot.id,
+      existing: state.notifications,
+      signals,
+      cooldownMs: this.cfg.notificationCooldownMs,
+      maxNotifications: this.cfg.maxNotifications,
+      now: snapshot.scannedAt
+    });
     await this.writeState(state);
     return snapshot;
   }
@@ -1295,6 +1415,40 @@ export class ProjectSupervisor {
     const events = await readWorkerOutbox(this.cfg.workerOutboxFile);
     const instructions = applyWorkerEventsToInstructions(state.instructions.slice(-this.cfg.maxInstructions), events);
     return status ? instructions.filter((instruction) => instruction.status === status) : instructions;
+  }
+
+  async listNotifications(status?: SupervisorNotificationStatus): Promise<SupervisorNotification[]> {
+    const state = await this.readState();
+    const notifications = state.notifications.filter((notification) => notification.projectId === this.cfg.projectId);
+    return status ? notifications.filter((notification) => notification.status === status) : notifications;
+  }
+
+  async acknowledgeNotification(id: string, acknowledgedBy = "human"): Promise<SupervisorNotification> {
+    const state = await this.readState();
+    const notification = state.notifications.find((entry) => entry.id === id || entry.signalId === id);
+    if (!notification) throw new Error(`Notification "${id}" was not found.`);
+    notification.status = "acknowledged";
+    notification.acknowledgedAt = nowIso();
+    notification.acknowledgedBy = acknowledgedBy;
+    notification.updatedAt = notification.acknowledgedAt;
+    await this.writeState(state);
+    await this.audit("notification_acknowledged", notification);
+    return notification;
+  }
+
+  async acknowledgeOpenNotifications(acknowledgedBy = "human"): Promise<SupervisorNotification[]> {
+    const state = await this.readState();
+    const now = nowIso();
+    const notifications = state.notifications.filter((entry) => entry.projectId === this.cfg.projectId && entry.status === "open");
+    for (const notification of notifications) {
+      notification.status = "acknowledged";
+      notification.acknowledgedAt = now;
+      notification.acknowledgedBy = acknowledgedBy;
+      notification.updatedAt = now;
+    }
+    await this.writeState(state);
+    await this.audit("notifications_acknowledged", { count: notifications.length, acknowledgedBy, at: now });
+    return notifications;
   }
 
   async listWorkerInbox(params: { workerId?: string; includeAcknowledged?: boolean } = {}): Promise<WorkerInboxInstruction[]> {
@@ -1339,10 +1493,11 @@ export class ProjectSupervisor {
   }
 
   async getOverview(): Promise<SupervisorOverview> {
-    const [snapshot, registry, instructions] = await Promise.all([
-      this.latest(),
+    const snapshot = await this.latest();
+    const [registry, instructions, notifications] = await Promise.all([
       this.readProjectRegistry(),
-      this.listInstructions()
+      this.listInstructions(),
+      this.listNotifications("open")
     ]);
     const activeProject = registry.projects.find((project) => project.id === this.cfg.projectId)
       ?? projectEntryFromConfig(this.cfg, undefined, snapshot.scannedAt);
@@ -1355,6 +1510,7 @@ export class ProjectSupervisor {
       recentInstructions: instructions.slice(-8).reverse(),
       nextActions: snapshot.nextActions,
       signals: snapshot.signals ?? [],
+      notifications: notifications.slice(-10).reverse(),
       panelUrl: this.getPanelUrl()
     };
   }
@@ -1514,6 +1670,7 @@ export class ProjectSupervisor {
 
   async renderTextStatus(forceScan = false): Promise<string> {
     const snapshot = forceScan ? await this.scan() : await this.latest();
+    const notifications = await this.listNotifications("open");
     const git = snapshot.git.available
       ? `branch ${snapshot.git.branch ?? "(unknown)"}, ${snapshot.git.changedFiles ?? 0} changed, ahead ${snapshot.git.aheadBy ?? 0}, behind ${snapshot.git.behindBy ?? 0}`
       : `git unavailable (${snapshot.git.error ?? "no details"})`;
@@ -1535,6 +1692,7 @@ export class ProjectSupervisor {
       `Git: ${git}`,
       `Worker: ${worker}`,
       `Pending instructions: ${pending.length}`,
+      `Open alerts: ${notifications.length}`,
       `Recent files: ${snapshot.fileScan.recent.length}`,
       `Tasks: ${tasks}`,
       "Risks:",
@@ -1669,6 +1827,26 @@ export class ProjectSupervisor {
       const parsedStatus: InstructionStatus | undefined =
         status === "pending" || status === "approved" || status === "rejected" || status === "dispatched" ? status : undefined;
       json(res, 200, { instructions: await this.listInstructions(parsedStatus) });
+      return true;
+    }
+    if (req.method === "GET" && parsed.pathname === "/api/notifications") {
+      const status = parsed.searchParams.get("status");
+      const parsedStatus: SupervisorNotificationStatus | undefined =
+        status === "open" || status === "acknowledged" || status === "resolved" ? status : undefined;
+      json(res, 200, { notifications: await this.listNotifications(parsedStatus) });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/ack-notification") {
+      const body = await readBodyJson(req);
+      const id = isRecord(body) && typeof body.id === "string" ? body.id : "";
+      const acknowledgedBy = isRecord(body) && typeof body.acknowledgedBy === "string" ? body.acknowledgedBy : "human";
+      json(res, 200, { notification: await this.acknowledgeNotification(id, acknowledgedBy) });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/ack-notifications") {
+      const body = await readBodyJson(req);
+      const acknowledgedBy = isRecord(body) && typeof body.acknowledgedBy === "string" ? body.acknowledgedBy : "human";
+      json(res, 200, { notifications: await this.acknowledgeOpenNotifications(acknowledgedBy) });
       return true;
     }
     if (req.method === "GET" && parsed.pathname === "/api/projects") {
@@ -1852,6 +2030,18 @@ export class ProjectSupervisorHub {
     return await (await this.getActiveSupervisor()).listInstructions(status);
   }
 
+  async listNotifications(status?: SupervisorNotificationStatus): Promise<SupervisorNotification[]> {
+    return await (await this.getActiveSupervisor()).listNotifications(status);
+  }
+
+  async acknowledgeNotification(id: string, acknowledgedBy = "human"): Promise<SupervisorNotification> {
+    return await (await this.getActiveSupervisor()).acknowledgeNotification(id, acknowledgedBy);
+  }
+
+  async acknowledgeOpenNotifications(acknowledgedBy = "human"): Promise<SupervisorNotification[]> {
+    return await (await this.getActiveSupervisor()).acknowledgeOpenNotifications(acknowledgedBy);
+  }
+
   async listWorkerInbox(params: { workerId?: string; includeAcknowledged?: boolean } = {}): Promise<WorkerInboxInstruction[]> {
     return await (await this.getActiveSupervisor()).listWorkerInbox(params);
   }
@@ -1867,10 +2057,11 @@ export class ProjectSupervisorHub {
 
   async getOverview(): Promise<SupervisorOverview> {
     const active = await this.getActiveSupervisor();
-    const [snapshot, registry, instructions] = await Promise.all([
-      active.latest(),
+    const snapshot = await active.latest();
+    const [registry, instructions, notifications] = await Promise.all([
       this.readProjectRegistry(),
-      active.listInstructions()
+      active.listInstructions(),
+      active.listNotifications("open")
     ]);
     const activeProject = registry.projects.find((project) => project.id === active.getConfig().projectId)
       ?? projectEntryFromConfig(active.getConfig(), undefined, snapshot.scannedAt);
@@ -1883,6 +2074,7 @@ export class ProjectSupervisorHub {
       recentInstructions: instructions.slice(-8).reverse(),
       nextActions: snapshot.nextActions,
       signals: snapshot.signals ?? [],
+      notifications: notifications.slice(-10).reverse(),
       panelUrl: this.getPanelUrl()
     };
   }
@@ -2005,6 +2197,26 @@ export class ProjectSupervisorHub {
       const parsedStatus: InstructionStatus | undefined =
         status === "pending" || status === "approved" || status === "rejected" || status === "dispatched" ? status : undefined;
       json(res, 200, { instructions: await this.listInstructions(parsedStatus) });
+      return true;
+    }
+    if (req.method === "GET" && parsed.pathname === "/api/notifications") {
+      const status = parsed.searchParams.get("status");
+      const parsedStatus: SupervisorNotificationStatus | undefined =
+        status === "open" || status === "acknowledged" || status === "resolved" ? status : undefined;
+      json(res, 200, { notifications: await this.listNotifications(parsedStatus) });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/ack-notification") {
+      const body = await readBodyJson(req);
+      const id = isRecord(body) && typeof body.id === "string" ? body.id : "";
+      const acknowledgedBy = isRecord(body) && typeof body.acknowledgedBy === "string" ? body.acknowledgedBy : "human";
+      json(res, 200, { notification: await this.acknowledgeNotification(id, acknowledgedBy) });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/ack-notifications") {
+      const body = await readBodyJson(req);
+      const acknowledgedBy = isRecord(body) && typeof body.acknowledgedBy === "string" ? body.acknowledgedBy : "human";
+      json(res, 200, { notifications: await this.acknowledgeOpenNotifications(acknowledgedBy) });
       return true;
     }
     if (req.method === "GET" && parsed.pathname === "/api/projects") {
@@ -2154,6 +2366,11 @@ function renderDashboardHtml(token: string): string {
     <section class="panel"><h2>Summary</h2><pre id="summary"></pre></section>
     <section class="panel"><h2>Risks</h2><pre id="risks"></pre></section>
     <section class="panel"><h2>Signals</h2><pre id="signals"></pre></section>
+    <section class="panel">
+      <h2>Alerts</h2>
+      <table id="notifications"></table>
+      <div class="inline-actions"><button onclick="ackAllNotifications()">Acknowledge All</button></div>
+    </section>
     <section class="panel"><h2>Worker AI</h2><pre id="worker"></pre></section>
     <section class="panel"><h2>Next Actions</h2><pre id="nextActions"></pre></section>
     <section class="panel">
@@ -2193,6 +2410,16 @@ function renderDashboardHtml(token: string): string {
         + "<td><button onclick=\"approveInstruction('" + esc(item.id) + "')\">Approve</button> <button onclick=\"rejectInstruction('" + esc(item.id) + "')\">Reject</button></td>"
         + "</tr>").join("") + "</tbody>";
     }
+    function notificationRows(items) {
+      if (!items.length) return "<tbody><tr><td colspan='5'>None</td></tr></tbody>";
+      return "<tbody>" + items.map(item => "<tr>"
+        + "<td>" + esc(item.severity) + "</td>"
+        + "<td>" + esc(item.title) + "</td>"
+        + "<td>" + esc(item.detail) + "</td>"
+        + "<td>" + esc(item.updatedAt) + "</td>"
+        + "<td><button onclick=\"ackNotification('" + esc(item.id) + "')\">Ack</button></td>"
+        + "</tr>").join("") + "</tbody>";
+    }
     function updateProjects(registry) {
       const select = document.getElementById("project");
       if (!registry || !Array.isArray(registry.projects)) {
@@ -2224,6 +2451,7 @@ function renderDashboardHtml(token: string): string {
       document.getElementById("summary").textContent = s.summary + "\\nGit: " + (s.git.available ? s.git.status || "clean" : s.git.error);
       document.getElementById("risks").textContent = s.risks.length ? s.risks.map(r => "- " + r).join("\\n") : "- none";
       document.getElementById("signals").textContent = (data.signals || []).length ? data.signals.map(x => "- [" + x.severity + "] " + x.title + ": " + x.detail + (x.command ? " (" + x.command + ")" : "")).join("\\n") : "- none";
+      document.getElementById("notifications").innerHTML = notificationRows(data.notifications || []);
       document.getElementById("worker").textContent = [
         "Worker: " + s.worker.workerId,
         "Status: " + s.worker.status,
@@ -2266,6 +2494,14 @@ function renderDashboardHtml(token: string): string {
     async function rejectInstruction(id) {
       const reason = prompt("Reason") || "";
       await api("/api/reject", { method: "POST", body: JSON.stringify({ id, reason }) });
+      await refresh(true);
+    }
+    async function ackNotification(id) {
+      await api("/api/ack-notification", { method: "POST", body: JSON.stringify({ id, acknowledgedBy: "dashboard" }) });
+      await refresh(true);
+    }
+    async function ackAllNotifications() {
+      await api("/api/ack-notifications", { method: "POST", body: JSON.stringify({ acknowledgedBy: "dashboard" }) });
       await refresh(true);
     }
     async function proposeInstruction() {
@@ -2325,8 +2561,10 @@ function configFromPluginApi(api: any): SupervisorConfig {
     maxFiles: typeof raw.maxFiles === "number" ? raw.maxFiles : undefined,
     maxHistory: typeof raw.maxHistory === "number" ? raw.maxHistory : undefined,
     maxInstructions: typeof raw.maxInstructions === "number" ? raw.maxInstructions : undefined,
+    maxNotifications: typeof raw.maxNotifications === "number" ? raw.maxNotifications : undefined,
     maxTaskLogChars: typeof raw.maxTaskLogChars === "number" ? raw.maxTaskLogChars : undefined,
     commandTimeoutMs: typeof raw.commandTimeoutMs === "number" ? raw.commandTimeoutMs : undefined,
+    notificationCooldownMs: typeof raw.notificationCooldownMs === "number" ? raw.notificationCooldownMs : undefined,
     watchedPorts: Array.isArray(raw.watchedPorts) ? raw.watchedPorts as number[] : undefined,
     logFiles: Array.isArray(raw.logFiles) ? raw.logFiles as string[] : undefined,
     ignoreDirs: Array.isArray(raw.ignoreDirs) ? raw.ignoreDirs as string[] : undefined,
@@ -2397,6 +2635,10 @@ export function registerProjectSupervisor(api: any): void {
             ...(overview.signals.length > 0
               ? overview.signals.map((signal) => `- [${signal.severity}] ${signal.title}: ${signal.detail}${signal.command ? ` (${signal.command})` : ""}`)
               : ["- none"]),
+            "Alerts:",
+            ...(overview.notifications.length > 0
+              ? overview.notifications.map((notification) => `- [${notification.severity}] ${notification.id}/${notification.signalId}: ${notification.title}: ${notification.detail}`)
+              : ["- none"]),
             "Next actions:",
             ...overview.nextActions.map((action) => `- [${action.priority}] ${action.title}: ${action.detail}${action.command ? ` (${action.command})` : ""}`),
             "Pending instructions:",
@@ -2405,6 +2647,29 @@ export function registerProjectSupervisor(api: any): void {
               : ["- none"])
           ].join("\n")
         };
+      }
+      if (/^(alerts|notifications)$/i.test(args)) {
+        const notifications = (await supervisor.listNotifications("open")).slice(-8).reverse();
+        return {
+          text: notifications.length > 0
+            ? notifications.map((notification) => [
+              `${notification.id} [${notification.severity}] ${notification.signalId}`,
+              notification.title,
+              notification.detail,
+              notification.command ? `command: ${notification.command}` : null,
+              `seen: ${notification.lastSeenAt}, count: ${notification.occurrenceCount}`
+            ].filter((line) => line !== null).join("\n")).join("\n\n")
+            : "No open supervisor alerts."
+        };
+      }
+      if (/^ack\s+(alerts?|notifications?|all)$/i.test(args)) {
+        const notifications = await supervisor.acknowledgeOpenNotifications("mobile");
+        return { text: `Acknowledged ${notifications.length} open supervisor alert(s).` };
+      }
+      const ackNotificationMatch = /^ack\s+([a-zA-Z0-9_-]+)$/i.exec(args);
+      if (ackNotificationMatch) {
+        const notification = await supervisor.acknowledgeNotification(ackNotificationMatch[1], "mobile");
+        return { text: `Acknowledged alert ${notification.id} (${notification.signalId}).` };
       }
       const registerMatch = /^(register|register-project)(?:\s+([\s\S]+))?$/i.exec(args);
       if (registerMatch) {
@@ -2478,6 +2743,9 @@ export function registerProjectSupervisor(api: any): void {
           "/supervise status",
           "/supervise ai",
           "/supervise review",
+          "/supervise alerts",
+          "/supervise ack alerts",
+          "/supervise ack <alert-id-or-signal-id>",
           "/supervise projects",
           "/supervise register",
           "/supervise register <project-dir>",

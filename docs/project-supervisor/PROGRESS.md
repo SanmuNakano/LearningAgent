@@ -40,3 +40,8 @@
 - Added worker inbox reading for dispatched instructions and acknowledgement writing to worker outbox.
 - Added `GET /api/worker-inbox`, `POST /api/worker-ack`, `--worker-inbox`, `--worker-ack`, and `npm run supervisor:worker:inbox`.
 - Verified Phase 6 with `npm run check`; test suite is now 40 passing tests.
+- Started Phase 7: notification policy and alert queue.
+- Added deduplicated supervisor notifications from watch/critical signals with acknowledgement, auto-resolution, and cooldown behavior.
+- Added `GET /api/notifications`, `POST /api/ack-notification`, `POST /api/ack-notifications`, `/supervise alerts`, `/supervise ack alerts`, and `/supervise ack <id-or-signal>`.
+- Added dashboard alert display and acknowledgement actions.
+- Verified Phase 7 with `npm run check`; test suite is now 42 passing tests.

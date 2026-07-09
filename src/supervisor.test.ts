@@ -184,6 +184,81 @@ describe("ProjectSupervisor", () => {
     }
   });
 
+  it("opens and acknowledges notifications from supervision signals", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisorDir = join(projectDir, ".project-supervisor");
+      await mkdir(supervisorDir, { recursive: true });
+      await writeFile(join(supervisorDir, "worker-state.json"), JSON.stringify({
+        workerId: "codex-main",
+        status: "working",
+        currentStep: "Reviewing instructions"
+      }), "utf-8");
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(supervisorDir, "state.json"),
+        autoStartServer: false,
+        notificationCooldownMs: 60_000,
+        maxFiles: 100
+      });
+
+      await supervisor.createInstruction({
+        instruction: "Review this proposed action.",
+        createdBy: "supervisor",
+        source: "system"
+      });
+      await supervisor.scan();
+
+      const open = await supervisor.listNotifications("open");
+      const notification = open.find((entry) => entry.signalId === "pending-human-decision");
+      expect(notification?.status).toBe("open");
+
+      const overview = await supervisor.getOverview();
+      expect(overview.notifications.some((entry) => entry.signalId === "pending-human-decision")).toBe(true);
+
+      await supervisor.acknowledgeNotification("pending-human-decision", "test");
+      expect(await supervisor.listNotifications("open")).toHaveLength(0);
+
+      await supervisor.scan();
+      expect(await supervisor.listNotifications("open")).toHaveLength(0);
+      const acknowledged = await supervisor.listNotifications("acknowledged");
+      expect(acknowledged[0].acknowledgedBy).toBe("test");
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
+  it("resolves open notifications when their signal disappears", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisorDir = join(projectDir, ".project-supervisor");
+      await mkdir(supervisorDir, { recursive: true });
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(supervisorDir, "state.json"),
+        autoStartServer: false,
+        maxFiles: 100
+      });
+
+      await supervisor.scan();
+      expect((await supervisor.listNotifications("open")).some((entry) => entry.signalId === "worker-heartbeat-missing")).toBe(true);
+
+      await writeFile(join(supervisorDir, "worker-state.json"), JSON.stringify({
+        workerId: "codex-main",
+        status: "working",
+        currentStep: "Continuing work"
+      }), "utf-8");
+      await supervisor.scan();
+
+      expect((await supervisor.listNotifications("open")).some((entry) => entry.signalId === "worker-heartbeat-missing")).toBe(false);
+      expect((await supervisor.listNotifications("resolved")).some((entry) => entry.signalId === "worker-heartbeat-missing")).toBe(true);
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
   it("emits a critical signal for repeated command failures", async () => {
     const projectDir = await makeProject();
     try {
