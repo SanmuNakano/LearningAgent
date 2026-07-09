@@ -37,6 +37,7 @@ OpenClaw commands:
 ```text
 /supervise status
 /supervise ai
+/supervise review
 /supervise projects
 /supervise register
 /supervise register D:\learn\another-project
@@ -44,9 +45,12 @@ OpenClaw commands:
 /supervise scan
 /supervise propose
 /supervise propose <instruction>
+/supervise approve latest
 /supervise approve <instruction-id>
+/supervise reject latest
 /supervise reject <instruction-id>
 /supervise tell <instruction>
+/supervise pause
 /supervise url
 /supervise run build
 /supervise run test

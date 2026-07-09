@@ -142,15 +142,19 @@ The OpenClaw command surface maps to the protocol:
 
 - `/supervise status` shows project and worker state.
 - `/supervise ai` shows detailed worker heartbeat.
+- `/supervise review` shows active project, worker state, next actions, and pending instructions.
 - `/supervise projects` lists registered projects.
 - `/supervise register` registers the current project in the central registry.
 - `/supervise register <project-dir>` registers another local project and makes it active.
 - `/supervise activate <project-id>` or `/supervise use <project-id>` switches the active project.
 - `/supervise propose` shows recommended next actions.
 - `/supervise propose <instruction>` creates a pending instruction.
+- `/supervise approve latest` approves and dispatches the newest pending instruction.
 - `/supervise approve <id>` approves and dispatches a pending instruction.
+- `/supervise reject latest` rejects the newest pending instruction.
 - `/supervise reject <id>` rejects a pending instruction.
 - `/supervise tell <instruction>` immediately dispatches a human-approved instruction.
+- `/supervise pause` asks the worker AI to stop editing and report current status.
 - `/supervise pending` lists recent supervisor instructions.
 
 ## HTTP API
@@ -158,6 +162,9 @@ The OpenClaw command surface maps to the protocol:
 The dashboard and phone gateway use the same active project routing:
 
 - `GET /api/projects` returns the registry.
+- `GET /api/overview` returns the active project, latest snapshot, pending instructions, recent instructions, next actions, allowed commands, registry, and panel URL.
 - `POST /api/register-project` with optional `{ "projectDir": "...", "projectId": "..." }` registers a project.
 - `POST /api/activate-project` with `{ "id": "project-id" }` switches the active project.
+- `POST /api/approve-latest` approves the newest pending instruction for the active project.
+- `POST /api/reject-latest` rejects the newest pending instruction for the active project.
 - `GET /api/status`, `POST /api/scan`, `GET /api/worker`, `GET /api/instructions`, `POST /api/run`, `POST /api/propose`, `POST /api/tell`, `POST /api/approve`, and `POST /api/reject` operate on the active project.

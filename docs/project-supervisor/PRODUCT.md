@@ -264,6 +264,8 @@ Required:
 - Select active project from mobile.
 - Keep per-project state isolated.
 - Support different worker AI adapters.
+- Expose an operator overview for active project decisions.
+- Add dashboard actions for approving, rejecting, and dispatching instructions.
 
 ### Phase 5: Smarter Supervision
 

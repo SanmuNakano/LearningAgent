@@ -39,6 +39,20 @@ async function removeProject(dir: string): Promise<void> {
   }
 }
 
+function makeResponse() {
+  return {
+    statusCode: 0,
+    headers: {} as Record<string, string>,
+    body: "",
+    setHeader(name: string, value: string) {
+      this.headers[name] = value;
+    },
+    end(value: unknown) {
+      this.body = typeof value === "string" ? value : String(value ?? "");
+    }
+  };
+}
+
 describe("ProjectSupervisor", () => {
   it("normalizes defaults and named commands", () => {
     const cfg = normalizeSupervisorConfig({
@@ -221,6 +235,68 @@ describe("ProjectSupervisor", () => {
     }
   });
 
+  it("builds an operator overview and approves or rejects the latest pending instruction", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisorDir = join(projectDir, ".project-supervisor");
+      await mkdir(supervisorDir, { recursive: true });
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(supervisorDir, "state.json"),
+        workerInboxFile: join(supervisorDir, "inbox.jsonl"),
+        auditFile: join(supervisorDir, "audit.jsonl"),
+        autoStartServer: false,
+        maxFiles: 100
+      });
+
+      const first = await supervisor.createInstruction({ instruction: "First pending instruction." });
+      const second = await supervisor.createInstruction({ instruction: "Second pending instruction." });
+      const overview = await supervisor.getOverview();
+
+      expect(overview.activeProject.id).toBe("test-project");
+      expect(overview.pendingInstructions.map((instruction) => instruction.id)).toEqual([first.id, second.id]);
+
+      const approved = await supervisor.approveLatestPendingInstruction();
+      expect(approved.id).toBe(second.id);
+      expect(approved.status).toBe("dispatched");
+      const inbox = await readFile(join(supervisorDir, "inbox.jsonl"), "utf-8");
+      expect(inbox).toContain("Second pending instruction.");
+
+      const rejected = await supervisor.rejectLatestPendingInstruction("Not now.");
+      expect(rejected.id).toBe(first.id);
+      expect(rejected.status).toBe("rejected");
+      expect(rejected.rejectReason).toBe("Not now.");
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
+  it("requires the generated token for direct HTTP access", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(projectDir, ".project-supervisor", "state.json"),
+        autoStartServer: false,
+        maxFiles: 100
+      });
+      const unauthorized = makeResponse();
+      await supervisor.handleHttp({ method: "GET", url: "/api/status", headers: { host: "localhost" } } as any, unauthorized as any);
+
+      const token = await supervisor.ensureToken();
+      const authorized = makeResponse();
+      await supervisor.handleHttp({ method: "GET", url: `/api/overview?token=${token}`, headers: { host: "localhost" } } as any, authorized as any);
+
+      expect(unauthorized.statusCode).toBe(401);
+      expect(authorized.statusCode).toBe(200);
+      expect(JSON.parse(authorized.body).activeProject.id).toBe("test-project");
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
   it("registers the current project in a central project registry", async () => {
     const projectDir = await makeProject();
     try {
@@ -277,6 +353,7 @@ describe("ProjectSupervisor", () => {
       await hub.activateProject("project-b");
 
       const snapshot = await hub.scan();
+      const overview = await hub.getOverview();
       const instruction = await hub.createInstruction({
         instruction: "Continue project B and report status.",
         createdBy: "human",
@@ -288,6 +365,7 @@ describe("ProjectSupervisor", () => {
       expect(snapshot.projectDir).toBe(projectB);
       expect(snapshot.worker.workerId).toBe("codex-b");
       expect(snapshot.worker.currentStep).toBe("Building project B");
+      expect(overview.activeProject.id).toBe("project-b");
       expect(instruction.projectId).toBe("project-b");
       expect(inbox).toContain("Continue project B and report status.");
     } finally {

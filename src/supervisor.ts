@@ -181,6 +181,17 @@ export type SupervisorSnapshot = {
   projects: ProjectRegistry;
 };
 
+export type SupervisorOverview = {
+  activeProject: ProjectRegistryEntry;
+  snapshot: SupervisorSnapshot;
+  registry: ProjectRegistry;
+  commands: string[];
+  pendingInstructions: SupervisorInstruction[];
+  recentInstructions: SupervisorInstruction[];
+  nextActions: SupervisorNextAction[];
+  panelUrl: string;
+};
+
 type SupervisorState = {
   token?: string;
   snapshots: SupervisorSnapshot[];
@@ -1080,6 +1091,26 @@ export class ProjectSupervisor {
     return status ? instructions.filter((instruction) => instruction.status === status) : instructions;
   }
 
+  async getOverview(): Promise<SupervisorOverview> {
+    const [snapshot, registry, instructions] = await Promise.all([
+      this.latest(),
+      this.readProjectRegistry(),
+      this.listInstructions()
+    ]);
+    const activeProject = registry.projects.find((project) => project.id === this.cfg.projectId)
+      ?? projectEntryFromConfig(this.cfg, undefined, snapshot.scannedAt);
+    return {
+      activeProject,
+      snapshot,
+      registry,
+      commands: Object.keys(this.cfg.allowedCommands),
+      pendingInstructions: instructions.filter((instruction) => instruction.status === "pending"),
+      recentInstructions: instructions.slice(-8).reverse(),
+      nextActions: snapshot.nextActions,
+      panelUrl: this.getPanelUrl()
+    };
+  }
+
   async createInstruction(params: {
     instruction: string;
     createdBy?: "human" | "supervisor";
@@ -1110,6 +1141,13 @@ export class ProjectSupervisor {
     return instruction;
   }
 
+  async approveLatestPendingInstruction(): Promise<SupervisorInstruction> {
+    const pending = await this.listInstructions("pending");
+    const latest = pending.at(-1);
+    if (!latest) throw new Error("No pending instruction to approve.");
+    return await this.approveInstruction(latest.id);
+  }
+
   async approveInstruction(id: string): Promise<SupervisorInstruction> {
     const state = await this.readState();
     const instruction = state.instructions.find((entry) => entry.id === id);
@@ -1121,6 +1159,13 @@ export class ProjectSupervisor {
     await this.writeState(state);
     await this.audit("instruction_approved", instruction);
     return await this.dispatchInstruction(id);
+  }
+
+  async rejectLatestPendingInstruction(reason?: string): Promise<SupervisorInstruction> {
+    const pending = await this.listInstructions("pending");
+    const latest = pending.at(-1);
+    if (!latest) throw new Error("No pending instruction to reject.");
+    return await this.rejectInstruction(latest.id, reason);
   }
 
   async rejectInstruction(id: string, reason?: string): Promise<SupervisorInstruction> {
@@ -1319,18 +1364,23 @@ export class ProjectSupervisor {
   }
 
   async handleHttp(req: IncomingMessage, res: ServerResponse, token = this.token): Promise<boolean> {
+    const authToken = token || await this.ensureToken();
     const parsed = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     if (parsed.pathname.startsWith("/plugins/project-supervisor")) {
       parsed.pathname = parsed.pathname.replace(/^\/plugins\/project-supervisor/, "") || "/";
     }
-    if (!this.isAuthorized(req, parsed, token)) {
+    if (!this.isAuthorized(req, parsed, authToken)) {
       json(res, 401, { error: "unauthorized" });
       return true;
     }
     if (req.method === "GET" && parsed.pathname === "/") {
       res.statusCode = 200;
       res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.end(renderDashboardHtml(token));
+      res.end(renderDashboardHtml(authToken));
+      return true;
+    }
+    if (req.method === "GET" && parsed.pathname === "/api/overview") {
+      json(res, 200, await this.getOverview());
       return true;
     }
     if (req.method === "GET" && parsed.pathname === "/api/status") {
@@ -1384,11 +1434,21 @@ export class ProjectSupervisor {
       json(res, 200, { instruction: await this.approveInstruction(id) });
       return true;
     }
+    if (req.method === "POST" && parsed.pathname === "/api/approve-latest") {
+      json(res, 200, { instruction: await this.approveLatestPendingInstruction() });
+      return true;
+    }
     if (req.method === "POST" && parsed.pathname === "/api/reject") {
       const body = await readBodyJson(req);
       const id = isRecord(body) && typeof body.id === "string" ? body.id : "";
       const reason = isRecord(body) && typeof body.reason === "string" ? body.reason : undefined;
       json(res, 200, { instruction: await this.rejectInstruction(id, reason) });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/reject-latest") {
+      const body = await readBodyJson(req);
+      const reason = isRecord(body) && typeof body.reason === "string" ? body.reason : undefined;
+      json(res, 200, { instruction: await this.rejectLatestPendingInstruction(reason) });
       return true;
     }
     json(res, 404, { error: "not found" });
@@ -1519,12 +1579,41 @@ export class ProjectSupervisorHub {
     return await (await this.getActiveSupervisor()).listInstructions(status);
   }
 
+  async getOverview(): Promise<SupervisorOverview> {
+    const active = await this.getActiveSupervisor();
+    const [snapshot, registry, instructions] = await Promise.all([
+      active.latest(),
+      this.readProjectRegistry(),
+      active.listInstructions()
+    ]);
+    const activeProject = registry.projects.find((project) => project.id === active.getConfig().projectId)
+      ?? projectEntryFromConfig(active.getConfig(), undefined, snapshot.scannedAt);
+    return {
+      activeProject,
+      snapshot,
+      registry,
+      commands: Object.keys(active.getConfig().allowedCommands),
+      pendingInstructions: instructions.filter((instruction) => instruction.status === "pending"),
+      recentInstructions: instructions.slice(-8).reverse(),
+      nextActions: snapshot.nextActions,
+      panelUrl: this.getPanelUrl()
+    };
+  }
+
   async createInstruction(params: Parameters<ProjectSupervisor["createInstruction"]>[0]): Promise<SupervisorInstruction> {
     return await (await this.getActiveSupervisor()).createInstruction(params);
   }
 
+  async approveLatestPendingInstruction(): Promise<SupervisorInstruction> {
+    return await (await this.getActiveSupervisor()).approveLatestPendingInstruction();
+  }
+
   async approveInstruction(id: string): Promise<SupervisorInstruction> {
     return await (await this.getActiveSupervisor()).approveInstruction(id);
+  }
+
+  async rejectLatestPendingInstruction(reason?: string): Promise<SupervisorInstruction> {
+    return await (await this.getActiveSupervisor()).rejectLatestPendingInstruction(reason);
   }
 
   async rejectInstruction(id: string, reason?: string): Promise<SupervisorInstruction> {
@@ -1570,18 +1659,24 @@ export class ProjectSupervisorHub {
   }
 
   async handleHttp(req: IncomingMessage, res: ServerResponse, token = this.token): Promise<boolean> {
+    const authToken = token || await this.root.ensureToken();
+    this.token = authToken;
     const parsed = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     if (parsed.pathname.startsWith("/plugins/project-supervisor")) {
       parsed.pathname = parsed.pathname.replace(/^\/plugins\/project-supervisor/, "") || "/";
     }
-    if (!this.isAuthorized(req, parsed, token)) {
+    if (!this.isAuthorized(req, parsed, authToken)) {
       json(res, 401, { error: "unauthorized" });
       return true;
     }
     if (req.method === "GET" && parsed.pathname === "/") {
       res.statusCode = 200;
       res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.end(renderDashboardHtml(token));
+      res.end(renderDashboardHtml(authToken));
+      return true;
+    }
+    if (req.method === "GET" && parsed.pathname === "/api/overview") {
+      json(res, 200, await this.getOverview());
       return true;
     }
     if (req.method === "GET" && parsed.pathname === "/api/status") {
@@ -1656,11 +1751,21 @@ export class ProjectSupervisorHub {
       json(res, 200, { instruction: await this.approveInstruction(id) });
       return true;
     }
+    if (req.method === "POST" && parsed.pathname === "/api/approve-latest") {
+      json(res, 200, { instruction: await this.approveLatestPendingInstruction() });
+      return true;
+    }
     if (req.method === "POST" && parsed.pathname === "/api/reject") {
       const body = await readBodyJson(req);
       const id = isRecord(body) && typeof body.id === "string" ? body.id : "";
       const reason = isRecord(body) && typeof body.reason === "string" ? body.reason : undefined;
       json(res, 200, { instruction: await this.rejectInstruction(id, reason) });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/reject-latest") {
+      const body = await readBodyJson(req);
+      const reason = isRecord(body) && typeof body.reason === "string" ? body.reason : undefined;
+      json(res, 200, { instruction: await this.rejectLatestPendingInstruction(reason) });
       return true;
     }
     json(res, 404, { error: "not found" });
@@ -1702,15 +1807,17 @@ function renderDashboardHtml(token: string): string {
     main { max-width: 1080px; margin: 0 auto; padding: 20px; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
     h1 { font-size: 26px; margin: 0; letter-spacing: 0; }
-    button, select { min-height: 38px; border-radius: 6px; border: 1px solid #9aa5b1; background: #ffffff; color: #1f2933; padding: 0 12px; font: inherit; }
+    button, select, textarea { min-height: 38px; border-radius: 6px; border: 1px solid #9aa5b1; background: #ffffff; color: #1f2933; padding: 0 12px; font: inherit; }
     button { cursor: pointer; }
     .toolbar { display: flex; flex-wrap: wrap; gap: 8px; }
+    .inline-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
     .panel { border: 1px solid #d3cec4; border-radius: 8px; background: #fffdf8; padding: 14px; margin-bottom: 12px; }
     .metric { font-size: 12px; color: #52606d; }
     .value { font-size: 24px; font-weight: 700; margin-top: 4px; }
     .ok { color: #207227; } .watch { color: #9a5b00; } .blocked { color: #b42318; }
     pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 13px; line-height: 1.45; }
+    textarea { box-sizing: border-box; min-height: 76px; padding: 10px 12px; resize: vertical; width: 100%; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     td, th { text-align: left; border-bottom: 1px solid #e4ded4; padding: 8px 4px; vertical-align: top; }
     @media (max-width: 760px) { main { padding: 12px; } header { align-items: flex-start; flex-direction: column; } .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
@@ -1741,6 +1848,15 @@ function renderDashboardHtml(token: string): string {
     <section class="panel"><h2>Risks</h2><pre id="risks"></pre></section>
     <section class="panel"><h2>Worker AI</h2><pre id="worker"></pre></section>
     <section class="panel"><h2>Next Actions</h2><pre id="nextActions"></pre></section>
+    <section class="panel">
+      <h2>Instruction</h2>
+      <textarea id="instructionInput" placeholder="Instruction"></textarea>
+      <div class="inline-actions">
+        <button onclick="proposeInstruction()">Propose</button>
+        <button onclick="tellInstruction()">Tell</button>
+        <button onclick="pauseWorker()">Pause</button>
+      </div>
+    </section>
     <section class="panel"><h2>Pending Instructions</h2><table id="instructions"></table></section>
     <section class="panel"><h2>Recent Files</h2><table id="files"></table></section>
     <section class="panel"><h2>Tasks</h2><table id="taskTable"></table></section>
@@ -1753,8 +1869,21 @@ function renderDashboardHtml(token: string): string {
       if (!res.ok) throw new Error(await res.text());
       return await res.json();
     }
+    function esc(value) {
+      return String(value ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    }
     function rows(items, cols) {
-      return "<tbody>" + items.map(item => "<tr>" + cols.map(col => "<td>" + String(col(item) ?? "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])) + "</td>").join("") + "</tr>").join("") + "</tbody>";
+      return "<tbody>" + items.map(item => "<tr>" + cols.map(col => "<td>" + esc(col(item)) + "</td>").join("") + "</tr>").join("") + "</tbody>";
+    }
+    function pendingRows(items) {
+      if (!items.length) return "<tbody><tr><td colspan='5'>None</td></tr></tbody>";
+      return "<tbody>" + items.map(item => "<tr>"
+        + "<td>" + esc(item.id) + "</td>"
+        + "<td>" + esc(item.targetWorker) + "</td>"
+        + "<td>" + esc(item.instruction) + "</td>"
+        + "<td>" + esc(item.createdAt) + "</td>"
+        + "<td><button onclick=\"approveInstruction('" + esc(item.id) + "')\">Approve</button> <button onclick=\"rejectInstruction('" + esc(item.id) + "')\">Reject</button></td>"
+        + "</tr>").join("") + "</tbody>";
     }
     function updateProjects(registry) {
       const select = document.getElementById("project");
@@ -1773,7 +1902,8 @@ function renderDashboardHtml(token: string): string {
       select.value = registry.projects.some(p => p.id === current) ? current : (registry.activeProjectId || "");
     }
     async function refresh(force) {
-      const data = force ? await api("/api/scan", { method: "POST", body: "{}" }) : await api("/api/status");
+      if (force) await api("/api/scan", { method: "POST", body: "{}" });
+      const data = await api("/api/overview");
       const s = data.snapshot;
       updateProjects(data.registry || s.projects);
       document.getElementById("sub").textContent = s.projectDir + " | " + s.scannedAt;
@@ -1794,8 +1924,8 @@ function renderDashboardHtml(token: string): string {
         "Needs approval: " + (s.worker.needsUserApproval ? "yes" : "no"),
         "Blocker: " + (s.worker.blocker || "(none)")
       ].join("\\n");
-      document.getElementById("nextActions").textContent = s.nextActions.length ? s.nextActions.map(a => "- [" + a.priority + "] " + a.title + ": " + a.detail + (a.command ? " (" + a.command + ")" : "")).join("\\n") : "- none";
-      document.getElementById("instructions").innerHTML = rows(s.instructions.filter(x => x.status === "pending").slice(-12).reverse(), [x => x.id, x => x.targetWorker, x => x.instruction, x => x.createdAt]);
+      document.getElementById("nextActions").textContent = data.nextActions.length ? data.nextActions.map(a => "- [" + a.priority + "] " + a.title + ": " + a.detail + (a.command ? " (" + a.command + ")" : "")).join("\\n") : "- none";
+      document.getElementById("instructions").innerHTML = pendingRows((data.pendingInstructions || []).slice(-12).reverse());
       document.getElementById("files").innerHTML = rows(s.fileScan.recent, [x => x.path, x => x.modifiedAt, x => x.size + " B"]);
       document.getElementById("taskTable").innerHTML = rows(s.tasks.slice(-12).reverse(), [x => x.name, x => x.status, x => x.startedAt, x => (x.log || "").slice(-240)]);
       const select = document.getElementById("command");
@@ -1818,6 +1948,35 @@ function renderDashboardHtml(token: string): string {
       const id = document.getElementById("project").value;
       if (!id) return;
       await api("/api/activate-project", { method: "POST", body: JSON.stringify({ id }) });
+      await refresh(true);
+    }
+    async function approveInstruction(id) {
+      await api("/api/approve", { method: "POST", body: JSON.stringify({ id }) });
+      await refresh(true);
+    }
+    async function rejectInstruction(id) {
+      const reason = prompt("Reason") || "";
+      await api("/api/reject", { method: "POST", body: JSON.stringify({ id, reason }) });
+      await refresh(true);
+    }
+    async function proposeInstruction() {
+      const input = document.getElementById("instructionInput");
+      const instruction = input.value.trim();
+      if (!instruction) return;
+      await api("/api/propose", { method: "POST", body: JSON.stringify({ instruction }) });
+      input.value = "";
+      await refresh(true);
+    }
+    async function tellInstruction() {
+      const input = document.getElementById("instructionInput");
+      const instruction = input.value.trim();
+      if (!instruction) return;
+      await api("/api/tell", { method: "POST", body: JSON.stringify({ instruction }) });
+      input.value = "";
+      await refresh(true);
+    }
+    async function pauseWorker() {
+      await api("/api/tell", { method: "POST", body: JSON.stringify({ instruction: "Pause current work, do not make further edits, and report current status and blockers." }) });
       await refresh(true);
     }
     refresh(false).catch(err => document.getElementById("summary").textContent = err.message);
@@ -1916,6 +2075,24 @@ export function registerProjectSupervisor(api: any): void {
       if (/^ai$/i.test(args)) return { text: await supervisor.renderWorkerText() };
       if (/^(pending|instructions)$/i.test(args)) return { text: await supervisor.renderInstructionsText() };
       if (/^projects$/i.test(args)) return { text: await supervisor.renderProjectsText() };
+      if (/^review$/i.test(args)) {
+        const overview = await supervisor.getOverview();
+        const pending = overview.pendingInstructions.slice(-5).reverse();
+        return {
+          text: [
+            `Active project: ${overview.activeProject.id}`,
+            `Health: ${overview.snapshot.health}`,
+            `Worker: ${overview.snapshot.worker.workerId}:${overview.snapshot.worker.status}`,
+            `Step: ${overview.snapshot.worker.currentStep ?? "(not reported)"}`,
+            "Next actions:",
+            ...overview.nextActions.map((action) => `- [${action.priority}] ${action.title}: ${action.detail}${action.command ? ` (${action.command})` : ""}`),
+            "Pending instructions:",
+            ...(pending.length > 0
+              ? pending.map((instruction) => `- ${instruction.id} -> ${instruction.targetWorker}: ${instruction.instruction}`)
+              : ["- none"])
+          ].join("\n")
+        };
+      }
       const registerMatch = /^(register|register-project)(?:\s+([\s\S]+))?$/i.exec(args);
       if (registerMatch) {
         const projectDir = registerMatch[2]?.trim();
@@ -1949,10 +2126,28 @@ export function registerProjectSupervisor(api: any): void {
         const instruction = await supervisor.createInstruction({ instruction: tellMatch[1], createdBy: "human", source: "mobile", approve: true });
         return { text: `Dispatched instruction ${instruction.id} to ${instruction.targetWorker}.` };
       }
+      if (/^pause$/i.test(args)) {
+        const instruction = await supervisor.createInstruction({
+          instruction: "Pause current work, do not make further edits, and report current status and blockers.",
+          createdBy: "human",
+          source: "mobile",
+          approve: true
+        });
+        return { text: `Dispatched pause instruction ${instruction.id} to ${instruction.targetWorker}.` };
+      }
+      if (/^approve\s+latest$/i.test(args)) {
+        const instruction = await supervisor.approveLatestPendingInstruction();
+        return { text: `Approved and dispatched latest pending instruction ${instruction.id} to ${instruction.targetWorker}.` };
+      }
       const approveMatch = /^approve\s+([a-f0-9]{8,32})$/i.exec(args);
       if (approveMatch) {
         const instruction = await supervisor.approveInstruction(approveMatch[1]);
         return { text: `Approved and dispatched ${instruction.id} to ${instruction.targetWorker}.` };
+      }
+      const rejectLatestMatch = /^reject\s+latest(?:\s+([\s\S]+))?$/i.exec(args);
+      if (rejectLatestMatch) {
+        const instruction = await supervisor.rejectLatestPendingInstruction(rejectLatestMatch[1]);
+        return { text: `Rejected latest pending instruction ${instruction.id}.` };
       }
       const rejectMatch = /^reject\s+([a-f0-9]{8,32})(?:\s+([\s\S]+))?$/i.exec(args);
       if (rejectMatch) {
@@ -1969,6 +2164,7 @@ export function registerProjectSupervisor(api: any): void {
           "Project Supervisor commands:",
           "/supervise status",
           "/supervise ai",
+          "/supervise review",
           "/supervise projects",
           "/supervise register",
           "/supervise register <project-dir>",
@@ -1976,9 +2172,12 @@ export function registerProjectSupervisor(api: any): void {
           "/supervise scan",
           "/supervise propose",
           "/supervise propose <instruction>",
+          "/supervise approve latest",
           "/supervise approve <instruction-id>",
+          "/supervise reject latest",
           "/supervise reject <instruction-id>",
           "/supervise tell <instruction>",
+          "/supervise pause",
           "/supervise url",
           "/supervise run build",
           "/supervise run test",

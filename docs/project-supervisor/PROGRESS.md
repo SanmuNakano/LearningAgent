@@ -25,3 +25,9 @@
 - Routed status, scan, worker state, instructions, command runs, approvals, and direct human instructions to the active project.
 - Verified Phase 3 with `npm run check`; test suite is now 35 passing tests.
 - Restarted the local supervisor panel on port 8791 and smoke-tested register, projects, activate, and active status APIs.
+- Started Phase 4: operator overview and action flows.
+- Added `GET /api/overview` for active project, snapshot, pending instructions, recent instructions, next actions, commands, registry, and panel URL.
+- Added dashboard actions for proposing, telling, pausing, approving, and rejecting worker instructions.
+- Added `/supervise review`, `/supervise approve latest`, `/supervise reject latest`, and `/supervise pause`.
+- Strengthened direct HTTP token handling so a generated token is required before serving protected routes.
+- Verified Phase 4 with `npm run check`; test suite is now 37 passing tests.
