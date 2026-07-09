@@ -10,7 +10,8 @@
     "plugin:validate": "npm run check",
     "plugin:validate:tool": "npm run build && openclaw plugins validate --entry ./dist/index.js",
     "test": "vitest run",
-    "supervisor:serve": "npm run build && node ./dist/supervisor.js --serve --project D:\\learn\\openclaw-plugins"
+    "supervisor:serve": "npm run build && node ./dist/supervisor.js --serve --project D:\\learn\\openclaw-plugins",
+    "supervisor:worker:inbox": "npm run build && node ./dist/supervisor.js --worker-inbox --project D:\\learn\\openclaw-plugins"
   },
   "files": [
     "dist",

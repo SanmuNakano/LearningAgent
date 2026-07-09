@@ -89,6 +89,26 @@ Supported instruction event statuses:
 
 The supervisor merges the latest outbox event into instruction status views. If an instruction reports `failed`, project health becomes `blocked` until the failure is reviewed or superseded by a later event.
 
+## Worker Adapter Helpers
+
+The file-based adapter can read open inbox instructions and write acknowledgement events.
+
+HTTP:
+
+- `GET /api/worker-inbox` returns non-terminal inbox instructions for the active project.
+- `GET /api/worker-inbox?includeAcknowledged=1` includes completed, failed, and ignored instructions.
+- `GET /api/worker-inbox?workerId=codex-main` filters by worker id.
+- `POST /api/worker-ack` with `{ "id": "...", "status": "received", "message": "..." }` appends an outbox acknowledgement.
+
+CLI:
+
+```bash
+npm run supervisor:worker:inbox
+node ./dist/supervisor.js --worker-inbox --project D:\learn\openclaw-plugins
+node ./dist/supervisor.js --worker-ack <instruction-id> received --project D:\learn\openclaw-plugins --message "Instruction received."
+node ./dist/supervisor.js --worker-ack <instruction-id> completed --project D:\learn\openclaw-plugins --message "Done."
+```
+
 ## Audit Log
 
 The supervisor appends decision events to `.project-supervisor/audit.jsonl`.

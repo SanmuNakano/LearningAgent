@@ -318,6 +318,57 @@ describe("ProjectSupervisor", () => {
     }
   });
 
+  it("lets a worker read inbox instructions and write acknowledgements", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisorDir = join(projectDir, ".project-supervisor");
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(supervisorDir, "state.json"),
+        workerInboxFile: join(supervisorDir, "inbox.jsonl"),
+        workerOutboxFile: join(supervisorDir, "outbox.jsonl"),
+        auditFile: join(supervisorDir, "audit.jsonl"),
+        autoStartServer: false
+      });
+
+      const dispatched = await supervisor.createInstruction({
+        instruction: "Inspect the latest failure.",
+        createdBy: "human",
+        source: "mobile",
+        approve: true
+      });
+      const initialInbox = await supervisor.listWorkerInbox({ workerId: dispatched.targetWorker });
+      expect(initialInbox).toHaveLength(1);
+      expect(initialInbox[0].instruction).toBe("Inspect the latest failure.");
+
+      const received = await supervisor.acknowledgeWorkerInstruction({
+        instructionId: dispatched.id,
+        status: "received",
+        message: "I will inspect it now.",
+        workerId: dispatched.targetWorker
+      });
+      expect(received.status).toBe("received");
+      const activeInbox = await supervisor.listWorkerInbox({ workerId: dispatched.targetWorker });
+      expect(activeInbox[0].workerStatus).toBe("received");
+      expect(activeInbox[0].workerMessage).toBe("I will inspect it now.");
+
+      await supervisor.acknowledgeWorkerInstruction({
+        instructionId: dispatched.id,
+        status: "completed",
+        message: "Inspection complete.",
+        workerId: dispatched.targetWorker
+      });
+      expect(await supervisor.listWorkerInbox({ workerId: dispatched.targetWorker })).toHaveLength(0);
+      const allInbox = await supervisor.listWorkerInbox({ workerId: dispatched.targetWorker, includeAcknowledged: true });
+      expect(allInbox[0].workerStatus).toBe("completed");
+      expect(allInbox[0].workerMessage).toBe("Inspection complete.");
+      await expect(supervisor.acknowledgeWorkerInstruction({ instructionId: "missing", status: "received" })).rejects.toThrow(/not found/);
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
   it("builds an operator overview and approves or rejects the latest pending instruction", async () => {
     const projectDir = await makeProject();
     try {

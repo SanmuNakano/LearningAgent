@@ -139,6 +139,19 @@ export type WorkerInstructionEvent = {
   at: string;
 };
 
+export type WorkerInboxInstruction = {
+  id: string;
+  projectId: string;
+  targetWorker: string;
+  instruction: string;
+  createdAt: string;
+  approvedAt?: string;
+  dispatchedAt: string;
+  workerStatus?: WorkerInstructionStatus;
+  workerMessage?: string;
+  workerUpdatedAt?: string;
+};
+
 export type ProjectRegistryEntry = {
   id: string;
   name?: string;
@@ -428,6 +441,54 @@ async function readWorkerOutbox(file: string): Promise<WorkerInstructionEvent[]>
     });
   }
   return events;
+}
+
+async function readWorkerInbox(file: string): Promise<WorkerInboxInstruction[]> {
+  const rawInstructions = await readJsonLines(file, 500);
+  const instructions: WorkerInboxInstruction[] = [];
+  for (const raw of rawInstructions) {
+    if (!isRecord(raw)) continue;
+    const id = optionalString(raw.id) ?? optionalString(raw.instructionId);
+    const projectId = optionalString(raw.projectId);
+    const targetWorker = optionalString(raw.targetWorker) ?? optionalString(raw.workerId);
+    const instruction = optionalString(raw.instruction);
+    const dispatchedAt = optionalString(raw.dispatchedAt);
+    if (!id || !projectId || !targetWorker || !instruction || !dispatchedAt) continue;
+    instructions.push({
+      id,
+      projectId,
+      targetWorker,
+      instruction,
+      createdAt: optionalString(raw.createdAt) ?? dispatchedAt,
+      approvedAt: optionalString(raw.approvedAt),
+      dispatchedAt
+    });
+  }
+  return instructions;
+}
+
+function mergeInboxWithWorkerEvents(instructions: WorkerInboxInstruction[], events: WorkerInstructionEvent[]): WorkerInboxInstruction[] {
+  const latestByInstruction = new Map<string, WorkerInstructionEvent>();
+  for (const event of events) {
+    const existing = latestByInstruction.get(event.instructionId);
+    if (!existing || Date.parse(event.at) >= Date.parse(existing.at)) {
+      latestByInstruction.set(event.instructionId, event);
+    }
+  }
+  return instructions.map((instruction) => {
+    const event = latestByInstruction.get(instruction.id);
+    if (!event) return instruction;
+    return {
+      ...instruction,
+      workerStatus: event.status,
+      workerMessage: event.message,
+      workerUpdatedAt: event.at
+    };
+  });
+}
+
+function isTerminalWorkerInstructionStatus(status: WorkerInstructionStatus | undefined): boolean {
+  return status === "completed" || status === "failed" || status === "ignored";
 }
 
 function applyWorkerEventsToInstructions(instructions: SupervisorInstruction[], events: WorkerInstructionEvent[]): SupervisorInstruction[] {
@@ -1236,6 +1297,47 @@ export class ProjectSupervisor {
     return status ? instructions.filter((instruction) => instruction.status === status) : instructions;
   }
 
+  async listWorkerInbox(params: { workerId?: string; includeAcknowledged?: boolean } = {}): Promise<WorkerInboxInstruction[]> {
+    const [inbox, outboxEvents] = await Promise.all([
+      readWorkerInbox(this.cfg.workerInboxFile),
+      readWorkerOutbox(this.cfg.workerOutboxFile)
+    ]);
+    const workerId = params.workerId?.trim();
+    let instructions = mergeInboxWithWorkerEvents(inbox, outboxEvents)
+      .filter((instruction) => instruction.projectId === this.cfg.projectId);
+    if (workerId) {
+      instructions = instructions.filter((instruction) => instruction.targetWorker === workerId);
+    }
+    if (!params.includeAcknowledged) {
+      instructions = instructions.filter((instruction) => !isTerminalWorkerInstructionStatus(instruction.workerStatus));
+    }
+    return instructions;
+  }
+
+  async acknowledgeWorkerInstruction(params: {
+    instructionId: string;
+    status: WorkerInstructionStatus;
+    message?: string;
+    workerId?: string;
+  }): Promise<WorkerInstructionEvent> {
+    const instructionId = params.instructionId.trim();
+    if (!instructionId) throw new Error("Instruction id is required.");
+    const instruction = (await this.listWorkerInbox({ includeAcknowledged: true }))
+      .find((entry) => entry.id === instructionId);
+    if (!instruction) throw new Error(`Instruction "${instructionId}" was not found in the worker inbox.`);
+    const event: WorkerInstructionEvent = {
+      instructionId,
+      projectId: instruction.projectId,
+      workerId: params.workerId?.trim() || instruction.targetWorker || this.cfg.defaultWorkerId,
+      status: params.status,
+      message: params.message?.trim() || undefined,
+      at: nowIso()
+    };
+    await appendJsonLine(this.cfg.workerOutboxFile, event);
+    await this.audit("worker_instruction_acknowledged", event);
+    return event;
+  }
+
   async getOverview(): Promise<SupervisorOverview> {
     const [snapshot, registry, instructions] = await Promise.all([
       this.latest(),
@@ -1542,6 +1644,26 @@ export class ProjectSupervisor {
       json(res, 200, { worker: await this.getWorkerState() });
       return true;
     }
+    if (req.method === "GET" && parsed.pathname === "/api/worker-inbox") {
+      const includeAcknowledged = parsed.searchParams.get("includeAcknowledged") === "1" || parsed.searchParams.get("includeAcknowledged") === "true";
+      const workerId = parsed.searchParams.get("workerId") ?? undefined;
+      json(res, 200, { instructions: await this.listWorkerInbox({ workerId, includeAcknowledged }) });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/worker-ack") {
+      const body = await readBodyJson(req);
+      const instructionId = isRecord(body) && typeof body.instructionId === "string"
+        ? body.instructionId
+        : isRecord(body) && typeof body.id === "string"
+          ? body.id
+          : "";
+      const status = parseWorkerInstructionStatus(isRecord(body) ? body.status : undefined);
+      if (!status) throw new Error("A valid worker instruction status is required.");
+      const message = isRecord(body) && typeof body.message === "string" ? body.message : undefined;
+      const workerId = isRecord(body) && typeof body.workerId === "string" ? body.workerId : undefined;
+      json(res, 200, { event: await this.acknowledgeWorkerInstruction({ instructionId, status, message, workerId }) });
+      return true;
+    }
     if (req.method === "GET" && parsed.pathname === "/api/instructions") {
       const status = parsed.searchParams.get("status");
       const parsedStatus: InstructionStatus | undefined =
@@ -1730,6 +1852,19 @@ export class ProjectSupervisorHub {
     return await (await this.getActiveSupervisor()).listInstructions(status);
   }
 
+  async listWorkerInbox(params: { workerId?: string; includeAcknowledged?: boolean } = {}): Promise<WorkerInboxInstruction[]> {
+    return await (await this.getActiveSupervisor()).listWorkerInbox(params);
+  }
+
+  async acknowledgeWorkerInstruction(params: {
+    instructionId: string;
+    status: WorkerInstructionStatus;
+    message?: string;
+    workerId?: string;
+  }): Promise<WorkerInstructionEvent> {
+    return await (await this.getActiveSupervisor()).acknowledgeWorkerInstruction(params);
+  }
+
   async getOverview(): Promise<SupervisorOverview> {
     const active = await this.getActiveSupervisor();
     const [snapshot, registry, instructions] = await Promise.all([
@@ -1843,6 +1978,26 @@ export class ProjectSupervisorHub {
     }
     if (req.method === "GET" && parsed.pathname === "/api/worker") {
       json(res, 200, { worker: await this.getWorkerState() });
+      return true;
+    }
+    if (req.method === "GET" && parsed.pathname === "/api/worker-inbox") {
+      const includeAcknowledged = parsed.searchParams.get("includeAcknowledged") === "1" || parsed.searchParams.get("includeAcknowledged") === "true";
+      const workerId = parsed.searchParams.get("workerId") ?? undefined;
+      json(res, 200, { instructions: await this.listWorkerInbox({ workerId, includeAcknowledged }) });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/worker-ack") {
+      const body = await readBodyJson(req);
+      const instructionId = isRecord(body) && typeof body.instructionId === "string"
+        ? body.instructionId
+        : isRecord(body) && typeof body.id === "string"
+          ? body.id
+          : "";
+      const status = parseWorkerInstructionStatus(isRecord(body) ? body.status : undefined);
+      if (!status) throw new Error("A valid worker instruction status is required.");
+      const message = isRecord(body) && typeof body.message === "string" ? body.message : undefined;
+      const workerId = isRecord(body) && typeof body.workerId === "string" ? body.workerId : undefined;
+      json(res, 200, { event: await this.acknowledgeWorkerInstruction({ instructionId, status, message, workerId }) });
       return true;
     }
     if (req.method === "GET" && parsed.pathname === "/api/instructions") {
@@ -2348,12 +2503,45 @@ export function registerProjectSupervisor(api: any): void {
 
 async function startCli(): Promise<void> {
   const args = process.argv.slice(2);
-  if (!args.includes("--serve")) return;
   const projectIndex = args.indexOf("--project");
   const portIndex = args.indexOf("--port");
-  const supervisor = new ProjectSupervisorHub({
+  const workerIdIndex = args.indexOf("--worker-id");
+  const baseConfig: SupervisorConfig = {
     projectDir: projectIndex >= 0 ? args[projectIndex + 1] : undefined,
     port: portIndex >= 0 ? Number(args[portIndex + 1]) : undefined,
+    host: "0.0.0.0"
+  };
+
+  if (args.includes("--worker-inbox")) {
+    const supervisor = new ProjectSupervisorHub({ ...baseConfig, autoStartServer: false }, console);
+    const instructions = await supervisor.listWorkerInbox({
+      workerId: workerIdIndex >= 0 ? args[workerIdIndex + 1] : undefined,
+      includeAcknowledged: args.includes("--include-acknowledged")
+    });
+    console.log(JSON.stringify({ instructions }, null, 2));
+    return;
+  }
+
+  const ackIndex = args.indexOf("--worker-ack");
+  if (ackIndex >= 0) {
+    const instructionId = args[ackIndex + 1] ?? "";
+    const status = parseWorkerInstructionStatus(args[ackIndex + 2]);
+    if (!status) throw new Error("Usage: --worker-ack <instruction-id> <received|started|completed|failed|ignored> [--message <text>] [--worker-id <id>]");
+    const messageIndex = args.indexOf("--message");
+    const supervisor = new ProjectSupervisorHub({ ...baseConfig, autoStartServer: false }, console);
+    const event = await supervisor.acknowledgeWorkerInstruction({
+      instructionId,
+      status,
+      message: messageIndex >= 0 ? args.slice(messageIndex + 1).join(" ") : undefined,
+      workerId: workerIdIndex >= 0 ? args[workerIdIndex + 1] : undefined
+    });
+    console.log(JSON.stringify({ event }, null, 2));
+    return;
+  }
+
+  if (!args.includes("--serve")) return;
+  const supervisor = new ProjectSupervisorHub({
+    ...baseConfig,
     host: "0.0.0.0"
   }, console);
   await supervisor.ensureStarted();

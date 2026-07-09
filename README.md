@@ -65,6 +65,14 @@ npm run supervisor:serve
 
 Then open the printed URL from the same machine. For phone access, expose the host via OpenClaw Gateway, Tailscale, LAN binding, or a trusted tunnel.
 
+Worker adapter helpers:
+
+```bash
+npm run supervisor:worker:inbox
+node ./dist/supervisor.js --worker-ack <instruction-id> received --project D:\learn\openclaw-plugins --message "Instruction received."
+node ./dist/supervisor.js --worker-ack <instruction-id> completed --project D:\learn\openclaw-plugins --message "Done."
+```
+
 Example plugin config:
 
 ```json

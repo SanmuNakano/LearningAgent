@@ -36,3 +36,7 @@
 - Added stale worker progress, repeated command failure, repeated worker instruction failure, pending human decision, review-ready changes, and git ahead/behind signals.
 - Signals now appear in text status, mobile review, and the dashboard.
 - Verified Phase 5 with `npm run check`; test suite is now 39 passing tests.
+- Started Phase 6: file-based worker adapter helpers.
+- Added worker inbox reading for dispatched instructions and acknowledgement writing to worker outbox.
+- Added `GET /api/worker-inbox`, `POST /api/worker-ack`, `--worker-inbox`, `--worker-ack`, and `npm run supervisor:worker:inbox`.
+- Verified Phase 6 with `npm run check`; test suite is now 40 passing tests.
