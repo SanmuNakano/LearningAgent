@@ -24,6 +24,7 @@ What it monitors:
 - configured log file tails
 - whitelist command tasks started from the panel or OpenClaw
 - risk state: `ok`, `watch`, or `blocked`
+- structured supervision signals such as stale worker progress, repeated command failures, pending human decisions, local changes ready for review, and git ahead/behind state
 
 Safe controls:
 

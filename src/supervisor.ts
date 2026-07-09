@@ -65,8 +65,11 @@ export type FileScanSummary = {
 export type GitSummary = {
   available: boolean;
   branch?: string;
+  upstream?: string;
   status?: string;
   changedFiles?: number;
+  aheadBy?: number;
+  behindBy?: number;
   lastCommit?: string;
   error?: string;
 };
@@ -162,6 +165,14 @@ export type SupervisorNextAction = {
   command?: string;
 };
 
+export type SupervisionSignal = {
+  id: string;
+  severity: "info" | "watch" | "critical";
+  title: string;
+  detail: string;
+  command?: string;
+};
+
 export type SupervisorSnapshot = {
   id: string;
   projectDir: string;
@@ -178,6 +189,7 @@ export type SupervisorSnapshot = {
   worker: WorkerState;
   instructions: SupervisorInstruction[];
   nextActions: SupervisorNextAction[];
+  signals: SupervisionSignal[];
   projects: ProjectRegistry;
 };
 
@@ -189,6 +201,7 @@ export type SupervisorOverview = {
   pendingInstructions: SupervisorInstruction[];
   recentInstructions: SupervisorInstruction[];
   nextActions: SupervisorNextAction[];
+  signals: SupervisionSignal[];
   panelUrl: string;
 };
 
@@ -597,17 +610,25 @@ async function scanGit(projectDir: string): Promise<GitSummary> {
   const inside = await runCapture("git rev-parse --is-inside-work-tree", projectDir);
   if (!inside.ok) return { available: false, error: (inside.error ?? inside.stderr ?? "git unavailable").trim().slice(0, 180) };
 
-  const [branch, status, lastCommit] = await Promise.all([
+  const [branch, status, lastCommit, upstream, divergence] = await Promise.all([
     runCapture("git branch --show-current", projectDir),
     runCapture("git status --short", projectDir),
-    runCapture("git log -1 --pretty=format:%h%x20%s", projectDir)
+    runCapture("git log -1 --pretty=format:%h%x20%s", projectDir),
+    runCapture("git rev-parse --abbrev-ref --symbolic-full-name @{u}", projectDir),
+    runCapture("git rev-list --left-right --count @{u}...HEAD", projectDir)
   ]);
   const statusText = status.stdout.trim();
+  const divergenceParts = divergence.ok ? divergence.stdout.trim().split(/\s+/).map((part) => Number(part)) : [];
+  const behindBy = Number.isFinite(divergenceParts[0]) ? divergenceParts[0] : undefined;
+  const aheadBy = Number.isFinite(divergenceParts[1]) ? divergenceParts[1] : undefined;
   return {
     available: true,
     branch: branch.stdout.trim() || undefined,
+    upstream: upstream.ok ? upstream.stdout.trim() || undefined : undefined,
     status: statusText,
     changedFiles: statusText ? statusText.split(/\r?\n/).filter(Boolean).length : 0,
+    aheadBy,
+    behindBy,
     lastCommit: lastCommit.stdout.trim() || undefined
   };
 }
@@ -690,6 +711,120 @@ function buildWorkerRisks(worker: WorkerState, instructions: SupervisorInstructi
   if (failedInstructions.length > 0) risks.push(`${failedInstructions.length} dispatched instruction(s) failed in the worker AI.`);
 
   return risks;
+}
+
+function buildSupervisionSignals(params: {
+  git: GitSummary;
+  tasks: TaskRecord[];
+  worker: WorkerState;
+  instructions: SupervisorInstruction[];
+  staleAfterMs: number;
+  nowMs?: number;
+}): SupervisionSignal[] {
+  const signals: SupervisionSignal[] = [];
+  const nowMs = params.nowMs ?? Date.now();
+  const pending = params.instructions.filter((instruction) => instruction.status === "pending");
+  const failedInstructions = params.instructions.filter((instruction) => instruction.workerStatus === "failed");
+  const runningTasks = params.tasks.filter((task) => task.status === "running");
+  const finishedTasks = params.tasks.filter((task) => task.status !== "running");
+  const latestFinished = finishedTasks.at(-1);
+
+  if (params.worker.source === "missing") {
+    signals.push({
+      id: "worker-heartbeat-missing",
+      severity: "watch",
+      title: "Worker heartbeat missing",
+      detail: "The worker AI has not reported heartbeat state for this project.",
+      command: "/supervise ai"
+    });
+  }
+
+  if (params.worker.source === "file" && (params.worker.status === "working" || params.worker.status === "idle")) {
+    const progressAt = params.worker.lastProgressAt ?? params.worker.lastActivityAt ?? params.worker.updatedAt;
+    const progressMs = progressAt ? Date.parse(progressAt) : 0;
+    if (progressMs > 0 && nowMs - progressMs > params.staleAfterMs) {
+      signals.push({
+        id: "worker-no-progress",
+        severity: nowMs - progressMs > params.staleAfterMs * 2 ? "critical" : "watch",
+        title: "Worker progress is stale",
+        detail: `No worker progress has been reported since ${progressAt}.`,
+        command: "/supervise review"
+      });
+    }
+  }
+
+  if (latestFinished && (latestFinished.status === "failed" || latestFinished.status === "timeout")) {
+    const previousSame = finishedTasks.slice(0, -1).reverse().find((task) => task.name === latestFinished.name);
+    if (previousSame && (previousSame.status === "failed" || previousSame.status === "timeout")) {
+      signals.push({
+        id: "repeated-command-failure",
+        severity: "critical",
+        title: "Command is failing repeatedly",
+        detail: `${latestFinished.name} failed or timed out in consecutive supervised runs.`,
+        command: "/supervise review"
+      });
+    }
+  }
+
+  if (failedInstructions.length >= 2) {
+    signals.push({
+      id: "repeated-worker-instruction-failure",
+      severity: "critical",
+      title: "Worker instruction failures repeated",
+      detail: `${failedInstructions.length} dispatched instruction(s) have failed in the worker AI.`,
+      command: "/supervise pending"
+    });
+  }
+
+  if (pending.length > 0) {
+    signals.push({
+      id: "pending-human-decision",
+      severity: "watch",
+      title: "Human decision pending",
+      detail: `${pending.length} instruction(s) are waiting for approval or rejection.`,
+      command: `/supervise approve ${pending[pending.length - 1].id}`
+    });
+  }
+
+  if (params.worker.status === "done" && params.git.available && (params.git.changedFiles ?? 0) > 0) {
+    signals.push({
+      id: "worker-done-review-ready",
+      severity: "watch",
+      title: "Worker finished with local changes",
+      detail: `${params.git.changedFiles} changed file(s) are ready for review.`,
+      command: "/supervise run check"
+    });
+  } else if (params.git.available && (params.git.changedFiles ?? 0) > 0 && runningTasks.length === 0) {
+    signals.push({
+      id: "local-changes-ready",
+      severity: "info",
+      title: "Local changes need review",
+      detail: `${params.git.changedFiles} changed file(s) are present with no supervised command running.`,
+      command: "/supervise review"
+    });
+  }
+
+  if (params.git.available && (params.git.aheadBy ?? 0) > 0) {
+    signals.push({
+      id: "git-ahead-unpushed",
+      severity: "watch",
+      title: "Local commits are not pushed",
+      detail: `${params.git.aheadBy} commit(s) are ahead of ${params.git.upstream ?? "upstream"}.`,
+      command: "/supervise review"
+    });
+  }
+
+  if (params.git.available && (params.git.behindBy ?? 0) > 0) {
+    signals.push({
+      id: "git-behind-upstream",
+      severity: "watch",
+      title: "Branch is behind upstream",
+      detail: `${params.git.behindBy} upstream commit(s) are not in the local branch.`,
+      command: "/supervise review"
+    });
+  }
+
+  return signals.slice(0, 10);
 }
 
 function combineHealth(projectHealth: SupervisorHealth, worker: WorkerState, instructions: SupervisorInstruction[]): SupervisorHealth {
@@ -1041,8 +1176,17 @@ export class ProjectSupervisor {
     ]);
     const projectRisk = buildRisks({ git, fileScan, ports, tasks, staleAfterMs: this.cfg.staleAfterMs });
     const workerRisks = buildWorkerRisks(worker, instructions);
-    const health = combineHealth(projectRisk.health, worker, instructions);
-    const risks = [...projectRisk.risks, ...workerRisks];
+    const signals = buildSupervisionSignals({ git, tasks, worker, instructions, staleAfterMs: this.cfg.staleAfterMs });
+    const baseHealth = combineHealth(projectRisk.health, worker, instructions);
+    const health = signals.some((signal) => signal.severity === "critical")
+      ? "blocked"
+      : baseHealth === "ok" && signals.some((signal) => signal.severity === "watch")
+        ? "watch"
+        : baseHealth;
+    const signalRisks = signals
+      .filter((signal) => signal.severity !== "info")
+      .map((signal) => `${signal.title}: ${signal.detail}`);
+    const risks = [...projectRisk.risks, ...workerRisks, ...signalRisks];
     const nextActions = buildNextActions({ projectHealth: projectRisk.health, git, tasks, worker, instructions });
     const changed = git.available ? `${git.changedFiles ?? 0} git change(s)` : "git unavailable";
     const summary = `${health.toUpperCase()}: ${changed}, ${fileScan.recent.length} recently touched file(s), ${tasks.filter((task) => task.status === "running").length} running task(s), ${tasks.filter((task) => task.status === "failed" || task.status === "timeout").length} failed task(s), worker ${worker.status}.`;
@@ -1062,6 +1206,7 @@ export class ProjectSupervisor {
       worker,
       instructions: instructions.slice(-20),
       nextActions,
+      signals,
       projects: registry
     };
     state.snapshots.push(snapshot);
@@ -1107,6 +1252,7 @@ export class ProjectSupervisor {
       pendingInstructions: instructions.filter((instruction) => instruction.status === "pending"),
       recentInstructions: instructions.slice(-8).reverse(),
       nextActions: snapshot.nextActions,
+      signals: snapshot.signals ?? [],
       panelUrl: this.getPanelUrl()
     };
   }
@@ -1267,12 +1413,15 @@ export class ProjectSupervisor {
   async renderTextStatus(forceScan = false): Promise<string> {
     const snapshot = forceScan ? await this.scan() : await this.latest();
     const git = snapshot.git.available
-      ? `branch ${snapshot.git.branch ?? "(unknown)"}, ${snapshot.git.changedFiles ?? 0} changed`
+      ? `branch ${snapshot.git.branch ?? "(unknown)"}, ${snapshot.git.changedFiles ?? 0} changed, ahead ${snapshot.git.aheadBy ?? 0}, behind ${snapshot.git.behindBy ?? 0}`
       : `git unavailable (${snapshot.git.error ?? "no details"})`;
     const tasks = snapshot.tasks.slice(-3).map((task) => `${task.name}:${task.status}`).join(", ") || "no tracked tasks";
     const pending = snapshot.instructions.filter((instruction) => instruction.status === "pending");
     const worker = `${snapshot.worker.workerId}:${snapshot.worker.status}${snapshot.worker.currentStep ? ` (${snapshot.worker.currentStep})` : ""}`;
     const risks = snapshot.risks.length > 0 ? snapshot.risks.map((risk) => `- ${risk}`).join("\n") : "- none";
+    const signals = (snapshot.signals ?? []).length > 0
+      ? (snapshot.signals ?? []).map((signal) => `- [${signal.severity}] ${signal.title}: ${signal.detail}${signal.command ? ` (${signal.command})` : ""}`).join("\n")
+      : "- none";
     const nextActions = snapshot.nextActions.length > 0
       ? snapshot.nextActions.map((action) => `- [${action.priority}] ${action.title}: ${action.detail}${action.command ? ` (${action.command})` : ""}`).join("\n")
       : "- none";
@@ -1288,6 +1437,8 @@ export class ProjectSupervisor {
       `Tasks: ${tasks}`,
       "Risks:",
       risks,
+      "Signals:",
+      signals,
       "Next actions:",
       nextActions,
       `Panel: ${this.getPanelUrl()}`
@@ -1596,6 +1747,7 @@ export class ProjectSupervisorHub {
       pendingInstructions: instructions.filter((instruction) => instruction.status === "pending"),
       recentInstructions: instructions.slice(-8).reverse(),
       nextActions: snapshot.nextActions,
+      signals: snapshot.signals ?? [],
       panelUrl: this.getPanelUrl()
     };
   }
@@ -1846,6 +1998,7 @@ function renderDashboardHtml(token: string): string {
     </section>
     <section class="panel"><h2>Summary</h2><pre id="summary"></pre></section>
     <section class="panel"><h2>Risks</h2><pre id="risks"></pre></section>
+    <section class="panel"><h2>Signals</h2><pre id="signals"></pre></section>
     <section class="panel"><h2>Worker AI</h2><pre id="worker"></pre></section>
     <section class="panel"><h2>Next Actions</h2><pre id="nextActions"></pre></section>
     <section class="panel">
@@ -1915,6 +2068,7 @@ function renderDashboardHtml(token: string): string {
       document.getElementById("tasks").textContent = s.tasks.length;
       document.getElementById("summary").textContent = s.summary + "\\nGit: " + (s.git.available ? s.git.status || "clean" : s.git.error);
       document.getElementById("risks").textContent = s.risks.length ? s.risks.map(r => "- " + r).join("\\n") : "- none";
+      document.getElementById("signals").textContent = (data.signals || []).length ? data.signals.map(x => "- [" + x.severity + "] " + x.title + ": " + x.detail + (x.command ? " (" + x.command + ")" : "")).join("\\n") : "- none";
       document.getElementById("worker").textContent = [
         "Worker: " + s.worker.workerId,
         "Status: " + s.worker.status,
@@ -2084,6 +2238,10 @@ export function registerProjectSupervisor(api: any): void {
             `Health: ${overview.snapshot.health}`,
             `Worker: ${overview.snapshot.worker.workerId}:${overview.snapshot.worker.status}`,
             `Step: ${overview.snapshot.worker.currentStep ?? "(not reported)"}`,
+            "Signals:",
+            ...(overview.signals.length > 0
+              ? overview.signals.map((signal) => `- [${signal.severity}] ${signal.title}: ${signal.detail}${signal.command ? ` (${signal.command})` : ""}`)
+              : ["- none"]),
             "Next actions:",
             ...overview.nextActions.map((action) => `- [${action.priority}] ${action.title}: ${action.detail}${action.command ? ` (${action.command})` : ""}`),
             "Pending instructions:",

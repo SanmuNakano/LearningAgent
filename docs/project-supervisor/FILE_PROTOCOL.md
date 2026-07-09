@@ -168,3 +168,33 @@ The dashboard and phone gateway use the same active project routing:
 - `POST /api/approve-latest` approves the newest pending instruction for the active project.
 - `POST /api/reject-latest` rejects the newest pending instruction for the active project.
 - `GET /api/status`, `POST /api/scan`, `GET /api/worker`, `GET /api/instructions`, `POST /api/run`, `POST /api/propose`, `POST /api/tell`, `POST /api/approve`, and `POST /api/reject` operate on the active project.
+
+## Supervision Signals
+
+Snapshots and `GET /api/overview` include `signals`.
+
+Signals are structured decision hints:
+
+```json
+{
+  "id": "worker-no-progress",
+  "severity": "critical",
+  "title": "Worker progress is stale",
+  "detail": "No worker progress has been reported since 2026-07-09T10:00:00.000Z.",
+  "command": "/supervise review"
+}
+```
+
+Current signal examples:
+
+- `worker-heartbeat-missing`
+- `worker-no-progress`
+- `repeated-command-failure`
+- `repeated-worker-instruction-failure`
+- `pending-human-decision`
+- `worker-done-review-ready`
+- `local-changes-ready`
+- `git-ahead-unpushed`
+- `git-behind-upstream`
+
+Critical signals promote overall project health to `blocked`. Watch signals promote an otherwise healthy project to `watch`.

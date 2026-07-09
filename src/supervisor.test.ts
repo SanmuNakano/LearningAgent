@@ -152,6 +152,89 @@ describe("ProjectSupervisor", () => {
     }
   });
 
+  it("emits a critical signal when worker progress is stale", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisorDir = join(projectDir, ".project-supervisor");
+      await mkdir(supervisorDir, { recursive: true });
+      await writeFile(join(supervisorDir, "worker-state.json"), JSON.stringify({
+        workerId: "codex-main",
+        status: "working",
+        currentStep: "Still editing the same file",
+        lastProgressAt: "2000-01-01T00:00:00.000Z",
+        updatedAt: "2000-01-01T00:00:00.000Z"
+      }), "utf-8");
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(supervisorDir, "state.json"),
+        autoStartServer: false,
+        staleAfterMs: 1_000,
+        maxFiles: 100
+      });
+
+      const snapshot = await supervisor.scan();
+      const signal = snapshot.signals.find((entry) => entry.id === "worker-no-progress");
+
+      expect(signal?.severity).toBe("critical");
+      expect(snapshot.health).toBe("blocked");
+      expect(snapshot.risks.some((risk) => risk.includes("Worker progress is stale"))).toBe(true);
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
+  it("emits a critical signal for repeated command failures", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisorDir = join(projectDir, ".project-supervisor");
+      const stateFile = join(supervisorDir, "state.json");
+      await mkdir(supervisorDir, { recursive: true });
+      await writeFile(stateFile, JSON.stringify({
+        snapshots: [],
+        instructions: [],
+        tasks: [
+          {
+            id: "task-1",
+            name: "check",
+            command: "npm run check",
+            startedAt: "2026-07-09T10:00:00.000Z",
+            finishedAt: "2026-07-09T10:00:01.000Z",
+            status: "failed",
+            exitCode: 1,
+            log: "first failure"
+          },
+          {
+            id: "task-2",
+            name: "check",
+            command: "npm run check",
+            startedAt: "2026-07-09T10:05:00.000Z",
+            finishedAt: "2026-07-09T10:05:01.000Z",
+            status: "timeout",
+            exitCode: null,
+            log: "second failure"
+          }
+        ]
+      }, null, 2), "utf-8");
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile,
+        autoStartServer: false,
+        maxFiles: 100
+      });
+
+      const snapshot = await supervisor.scan();
+      const signal = snapshot.signals.find((entry) => entry.id === "repeated-command-failure");
+
+      expect(signal?.severity).toBe("critical");
+      expect(signal?.detail).toContain("check");
+      expect(snapshot.health).toBe("blocked");
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
   it("queues, approves, dispatches, and audits worker instructions", async () => {
     const projectDir = await makeProject();
     try {

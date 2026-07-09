@@ -31,3 +31,8 @@
 - Added `/supervise review`, `/supervise approve latest`, `/supervise reject latest`, and `/supervise pause`.
 - Strengthened direct HTTP token handling so a generated token is required before serving protected routes.
 - Verified Phase 4 with `npm run check`; test suite is now 37 passing tests.
+- Started Phase 5: smarter supervision signals.
+- Added structured `signals` to snapshots and `GET /api/overview`.
+- Added stale worker progress, repeated command failure, repeated worker instruction failure, pending human decision, review-ready changes, and git ahead/behind signals.
+- Signals now appear in text status, mobile review, and the dashboard.
+- Verified Phase 5 with `npm run check`; test suite is now 39 passing tests.
