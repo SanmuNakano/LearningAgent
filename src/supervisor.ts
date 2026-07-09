@@ -114,6 +114,19 @@ export type WorkerState = {
   error?: string;
 };
 
+export type WorkerHeartbeatUpdate = {
+  workerId?: string;
+  status?: WorkerStatus;
+  goal?: string;
+  currentStep?: string;
+  plan?: unknown;
+  lastProgressAt?: string;
+  lastActivityAt?: string;
+  needsUserApproval?: boolean;
+  blocker?: string | null;
+  markProgress?: boolean;
+};
+
 export type SupervisorInstruction = {
   id: string;
   projectId: string;
@@ -397,10 +410,17 @@ async function runCapture(command: string, cwd: string, timeoutMs = 8_000): Prom
 }
 
 function parseWorkerStatus(value: unknown): WorkerStatus {
-  if (value === "working" || value === "waiting" || value === "idle" || value === "stuck" || value === "done") {
+  if (value === "unknown" || value === "working" || value === "waiting" || value === "idle" || value === "stuck" || value === "done") {
     return value;
   }
   return "unknown";
+}
+
+function parseWorkerStatusStrict(value: unknown): WorkerStatus | undefined {
+  if (value === "unknown" || value === "working" || value === "waiting" || value === "idle" || value === "stuck" || value === "done") {
+    return value;
+  }
+  return undefined;
 }
 
 function parseWorkerPlan(value: unknown): WorkerPlanItem[] {
@@ -1410,6 +1430,53 @@ export class ProjectSupervisor {
     return await readWorkerState(this.cfg);
   }
 
+  async updateWorkerHeartbeat(update: WorkerHeartbeatUpdate): Promise<WorkerState> {
+    const existing = await this.getWorkerState().catch(() => fallbackWorkerState({
+      projectId: this.cfg.projectId,
+      workerId: this.cfg.defaultWorkerId,
+      source: "missing"
+    }));
+    const now = nowIso();
+    const nextPlan = update.plan === undefined ? existing.plan : parseWorkerPlan(update.plan);
+    const nextStatus = update.status ?? existing.status;
+    const nextGoal = update.goal !== undefined ? update.goal.trim() || undefined : existing.goal;
+    const nextStep = update.currentStep !== undefined ? update.currentStep.trim() || undefined : existing.currentStep;
+    const nextBlocker = update.blocker !== undefined
+      ? typeof update.blocker === "string"
+        ? update.blocker.trim() || null
+        : update.blocker
+      : existing.blocker;
+    const progressChanged =
+      update.markProgress === true ||
+      nextStatus !== existing.status ||
+      nextGoal !== existing.goal ||
+      nextStep !== existing.currentStep ||
+      update.plan !== undefined;
+    const state = {
+      projectId: this.cfg.projectId,
+      workerId: update.workerId?.trim() || existing.workerId || this.cfg.defaultWorkerId,
+      status: nextStatus,
+      goal: nextGoal,
+      currentStep: nextStep,
+      plan: nextPlan,
+      lastProgressAt: update.lastProgressAt ?? (progressChanged ? now : existing.lastProgressAt),
+      lastActivityAt: update.lastActivityAt ?? now,
+      needsUserApproval: update.needsUserApproval ?? existing.needsUserApproval,
+      blocker: nextBlocker,
+      updatedAt: now
+    };
+    await writeJsonFile(this.cfg.workerStateFile, state);
+    await this.audit("worker_heartbeat_updated", {
+      workerId: state.workerId,
+      status: state.status,
+      goal: state.goal,
+      currentStep: state.currentStep,
+      needsUserApproval: state.needsUserApproval,
+      blocker: state.blocker
+    });
+    return await this.getWorkerState();
+  }
+
   async listInstructions(status?: InstructionStatus): Promise<SupervisorInstruction[]> {
     const state = await this.readState();
     const events = await readWorkerOutbox(this.cfg.workerOutboxFile);
@@ -1802,6 +1869,26 @@ export class ProjectSupervisor {
       json(res, 200, { worker: await this.getWorkerState() });
       return true;
     }
+    if (req.method === "POST" && parsed.pathname === "/api/worker-heartbeat") {
+      const body = await readBodyJson(req);
+      if (!isRecord(body)) throw new Error("Worker heartbeat body must be an object.");
+      const rawStatus = body.status;
+      const status = rawStatus === undefined ? undefined : parseWorkerStatusStrict(rawStatus);
+      if (rawStatus !== undefined && !status) throw new Error("A valid worker status is required.");
+      json(res, 200, { worker: await this.updateWorkerHeartbeat({
+        workerId: optionalString(body.workerId),
+        status,
+        goal: optionalString(body.goal),
+        currentStep: optionalString(body.currentStep) ?? optionalString(body.step),
+        plan: body.plan,
+        lastProgressAt: optionalString(body.lastProgressAt),
+        lastActivityAt: optionalString(body.lastActivityAt),
+        needsUserApproval: typeof body.needsUserApproval === "boolean" ? body.needsUserApproval : undefined,
+        blocker: body.blocker === null ? null : optionalString(body.blocker),
+        markProgress: body.markProgress === true
+      }) });
+      return true;
+    }
     if (req.method === "GET" && parsed.pathname === "/api/worker-inbox") {
       const includeAcknowledged = parsed.searchParams.get("includeAcknowledged") === "1" || parsed.searchParams.get("includeAcknowledged") === "true";
       const workerId = parsed.searchParams.get("workerId") ?? undefined;
@@ -2026,6 +2113,10 @@ export class ProjectSupervisorHub {
     return await (await this.getActiveSupervisor()).getWorkerState();
   }
 
+  async updateWorkerHeartbeat(update: WorkerHeartbeatUpdate): Promise<WorkerState> {
+    return await (await this.getActiveSupervisor()).updateWorkerHeartbeat(update);
+  }
+
   async listInstructions(status?: InstructionStatus): Promise<SupervisorInstruction[]> {
     return await (await this.getActiveSupervisor()).listInstructions(status);
   }
@@ -2172,6 +2263,26 @@ export class ProjectSupervisorHub {
       json(res, 200, { worker: await this.getWorkerState() });
       return true;
     }
+    if (req.method === "POST" && parsed.pathname === "/api/worker-heartbeat") {
+      const body = await readBodyJson(req);
+      if (!isRecord(body)) throw new Error("Worker heartbeat body must be an object.");
+      const rawStatus = body.status;
+      const status = rawStatus === undefined ? undefined : parseWorkerStatusStrict(rawStatus);
+      if (rawStatus !== undefined && !status) throw new Error("A valid worker status is required.");
+      json(res, 200, { worker: await this.updateWorkerHeartbeat({
+        workerId: optionalString(body.workerId),
+        status,
+        goal: optionalString(body.goal),
+        currentStep: optionalString(body.currentStep) ?? optionalString(body.step),
+        plan: body.plan,
+        lastProgressAt: optionalString(body.lastProgressAt),
+        lastActivityAt: optionalString(body.lastActivityAt),
+        needsUserApproval: typeof body.needsUserApproval === "boolean" ? body.needsUserApproval : undefined,
+        blocker: body.blocker === null ? null : optionalString(body.blocker),
+        markProgress: body.markProgress === true
+      }) });
+      return true;
+    }
     if (req.method === "GET" && parsed.pathname === "/api/worker-inbox") {
       const includeAcknowledged = parsed.searchParams.get("includeAcknowledged") === "1" || parsed.searchParams.get("includeAcknowledged") === "true";
       const workerId = parsed.searchParams.get("workerId") ?? undefined;
@@ -2311,6 +2422,21 @@ function json(res: ServerResponse, statusCode: number, body: unknown): void {
   res.statusCode = statusCode;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(body));
+}
+
+function readArg(args: string[], name: string): string | undefined {
+  const index = args.indexOf(name);
+  if (index < 0) return undefined;
+  const value = args[index + 1];
+  return value && !value.startsWith("--") ? value : undefined;
+}
+
+function readBooleanArg(args: string[], name: string, inverseName?: string): boolean | undefined {
+  if (inverseName && args.includes(inverseName)) return false;
+  if (!args.includes(name)) return undefined;
+  const raw = readArg(args, name);
+  if (!raw) return true;
+  return /^(1|true|yes|y)$/i.test(raw);
 }
 
 function renderDashboardHtml(token: string): string {
@@ -2779,6 +2905,33 @@ async function startCli(): Promise<void> {
     port: portIndex >= 0 ? Number(args[portIndex + 1]) : undefined,
     host: "0.0.0.0"
   };
+
+  const heartbeatIndex = args.indexOf("--worker-heartbeat");
+  if (heartbeatIndex >= 0) {
+    const rawStatus = args[heartbeatIndex + 1] && !args[heartbeatIndex + 1].startsWith("--") ? args[heartbeatIndex + 1] : undefined;
+    const status = rawStatus ? parseWorkerStatusStrict(rawStatus) : undefined;
+    if (rawStatus && !status) throw new Error("Usage: --worker-heartbeat [unknown|working|waiting|idle|stuck|done] [--goal <text>] [--step <text>] [--plan-json <json>] [--worker-id <id>]");
+    const planJson = readArg(args, "--plan-json");
+    const planFile = readArg(args, "--plan-file");
+    const plan = planJson
+      ? JSON.parse(planJson)
+      : planFile
+        ? JSON.parse(await fs.readFile(path.resolve(planFile), "utf-8"))
+        : undefined;
+    const supervisor = new ProjectSupervisorHub({ ...baseConfig, autoStartServer: false }, console);
+    const worker = await supervisor.updateWorkerHeartbeat({
+      workerId: workerIdIndex >= 0 ? args[workerIdIndex + 1] : undefined,
+      status,
+      goal: readArg(args, "--goal"),
+      currentStep: readArg(args, "--step") ?? readArg(args, "--current-step"),
+      plan,
+      needsUserApproval: readBooleanArg(args, "--needs-approval", "--no-approval"),
+      blocker: args.includes("--clear-blocker") ? null : readArg(args, "--blocker"),
+      markProgress: args.includes("--progress")
+    });
+    console.log(JSON.stringify({ worker }, null, 2));
+    return;
+  }
 
   if (args.includes("--worker-inbox")) {
     const supervisor = new ProjectSupervisorHub({ ...baseConfig, autoStartServer: false }, console);

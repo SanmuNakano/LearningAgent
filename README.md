@@ -71,7 +71,9 @@ Then open the printed URL from the same machine. For phone access, expose the ho
 Worker adapter helpers:
 
 ```bash
+npm run supervisor:worker:heartbeat
 npm run supervisor:worker:inbox
+node ./dist/supervisor.js --worker-heartbeat working --project D:\learn\openclaw-plugins --worker-id codex-main --goal "Build supervisor" --step "Running tests" --progress
 node ./dist/supervisor.js --worker-ack <instruction-id> received --project D:\learn\openclaw-plugins --message "Instruction received."
 node ./dist/supervisor.js --worker-ack <instruction-id> completed --project D:\learn\openclaw-plugins --message "Done."
 ```

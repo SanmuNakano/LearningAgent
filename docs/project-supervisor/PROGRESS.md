@@ -45,3 +45,7 @@
 - Added `GET /api/notifications`, `POST /api/ack-notification`, `POST /api/ack-notifications`, `/supervise alerts`, `/supervise ack alerts`, and `/supervise ack <id-or-signal>`.
 - Added dashboard alert display and acknowledgement actions.
 - Verified Phase 7 with `npm run check`; test suite is now 42 passing tests.
+- Started Phase 8: worker heartbeat writer helpers.
+- Added `POST /api/worker-heartbeat`, `--worker-heartbeat`, and `npm run supervisor:worker:heartbeat`.
+- Heartbeat writes normalize worker plan items, preserve omitted fields, refresh activity timestamps, and optionally mark progress.
+- Verified Phase 8 with `npm run check`; test suite is now 44 passing tests.

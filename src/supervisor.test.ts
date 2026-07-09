@@ -53,6 +53,17 @@ function makeResponse() {
   };
 }
 
+function makeJsonRequest(method: string, url: string, body: unknown) {
+  return {
+    method,
+    url,
+    headers: { host: "localhost" },
+    async *[Symbol.asyncIterator]() {
+      yield Buffer.from(JSON.stringify(body));
+    }
+  };
+}
+
 describe("ProjectSupervisor", () => {
   it("normalizes defaults and named commands", () => {
     const cfg = normalizeSupervisorConfig({
@@ -147,6 +158,87 @@ describe("ProjectSupervisor", () => {
       expect(snapshot.health).toBe("watch");
       expect(snapshot.risks).toContain("Worker AI is waiting for user input or approval.");
       expect(snapshot.nextActions.some((action) => action.id === "respond-to-worker")).toBe(true);
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
+  it("writes normalized worker heartbeat state", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisorDir = join(projectDir, ".project-supervisor");
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(supervisorDir, "state.json"),
+        autoStartServer: false,
+        maxFiles: 100
+      });
+
+      const worker = await supervisor.updateWorkerHeartbeat({
+        workerId: "codex-main",
+        status: "waiting",
+        goal: "Ship heartbeat writer",
+        currentStep: "Waiting for user review",
+        plan: [
+          { step: "Write API", status: "completed" },
+          { step: "Run tests", status: "in_progress" },
+          { step: "", status: "completed" },
+          { step: "Invalid status", status: "weird" }
+        ],
+        needsUserApproval: true,
+        blocker: "Need approval to continue.",
+        markProgress: true
+      });
+      const raw = JSON.parse(await readFile(join(supervisorDir, "worker-state.json"), "utf-8"));
+
+      expect(worker.source).toBe("file");
+      expect(worker.workerId).toBe("codex-main");
+      expect(worker.status).toBe("waiting");
+      expect(worker.plan).toEqual([
+        { step: "Write API", status: "completed" },
+        { step: "Run tests", status: "in_progress" },
+        { step: "Invalid status", status: "pending" }
+      ]);
+      expect(worker.needsUserApproval).toBe(true);
+      expect(worker.blocker).toBe("Need approval to continue.");
+      expect(raw.source).toBeUndefined();
+      expect(raw.lastProgressAt).toBeTruthy();
+      expect(raw.lastActivityAt).toBeTruthy();
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
+  it("updates worker heartbeat through the HTTP API", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(projectDir, ".project-supervisor", "state.json"),
+        autoStartServer: false,
+        maxFiles: 100
+      });
+      const token = await supervisor.ensureToken();
+      const response = makeResponse();
+
+      await supervisor.handleHttp(makeJsonRequest("POST", `/api/worker-heartbeat?token=${token}`, {
+        workerId: "codex-api",
+        status: "working",
+        goal: "Report through API",
+        step: "Posting heartbeat",
+        plan: [{ step: "Post heartbeat", status: "completed" }],
+        needsUserApproval: false,
+        blocker: null,
+        markProgress: true
+      }) as any, response as any);
+
+      const body = JSON.parse(response.body);
+      expect(response.statusCode).toBe(200);
+      expect(body.worker.workerId).toBe("codex-api");
+      expect(body.worker.currentStep).toBe("Posting heartbeat");
+      expect(body.worker.plan[0].step).toBe("Post heartbeat");
     } finally {
       await removeProject(projectDir);
     }

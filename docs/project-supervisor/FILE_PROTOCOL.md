@@ -57,6 +57,8 @@ Supported plan statuses:
 - `completed`
 - `blocked`
 
+The worker AI can write heartbeat state directly, or use the helper API/CLI. Helper writes normalize plan items, trim text fields, preserve existing fields when omitted, refresh `lastActivityAt`, and refresh `lastProgressAt` when the update marks progress or changes meaningful status/goal/step/plan content.
+
 ## Instruction Inbox
 
 The supervisor appends approved instructions to `.project-supervisor/inbox.jsonl`.
@@ -91,19 +93,41 @@ The supervisor merges the latest outbox event into instruction status views. If 
 
 ## Worker Adapter Helpers
 
-The file-based adapter can read open inbox instructions and write acknowledgement events.
+The file-based adapter can report heartbeat state, read open inbox instructions, and write acknowledgement events.
 
 HTTP:
 
+- `POST /api/worker-heartbeat` writes `.project-supervisor/worker-state.json`.
 - `GET /api/worker-inbox` returns non-terminal inbox instructions for the active project.
 - `GET /api/worker-inbox?includeAcknowledged=1` includes completed, failed, and ignored instructions.
 - `GET /api/worker-inbox?workerId=codex-main` filters by worker id.
 - `POST /api/worker-ack` with `{ "id": "...", "status": "received", "message": "..." }` appends an outbox acknowledgement.
 
+Heartbeat body example:
+
+```json
+{
+  "workerId": "codex-main",
+  "status": "working",
+  "goal": "Implement supervisor alerts",
+  "step": "Running tests",
+  "plan": [
+    { "step": "Patch code", "status": "completed" },
+    { "step": "Run tests", "status": "in_progress" }
+  ],
+  "needsUserApproval": false,
+  "blocker": null,
+  "markProgress": true
+}
+```
+
 CLI:
 
 ```bash
 npm run supervisor:worker:inbox
+node ./dist/supervisor.js --worker-heartbeat working --project D:\learn\openclaw-plugins --worker-id codex-main --goal "Implement supervisor alerts" --step "Running tests" --progress
+node ./dist/supervisor.js --worker-heartbeat waiting --project D:\learn\openclaw-plugins --needs-approval true --blocker "Need approval to run deployment."
+node ./dist/supervisor.js --worker-heartbeat working --project D:\learn\openclaw-plugins --plan-json "[{\"step\":\"Patch code\",\"status\":\"completed\"}]"
 node ./dist/supervisor.js --worker-inbox --project D:\learn\openclaw-plugins
 node ./dist/supervisor.js --worker-ack <instruction-id> received --project D:\learn\openclaw-plugins --message "Instruction received."
 node ./dist/supervisor.js --worker-ack <instruction-id> completed --project D:\learn\openclaw-plugins --message "Done."
@@ -186,6 +210,7 @@ The dashboard and phone gateway use the same active project routing:
 
 - `GET /api/projects` returns the registry.
 - `GET /api/overview` returns the active project, latest snapshot, pending instructions, recent instructions, next actions, allowed commands, registry, and panel URL.
+- `POST /api/worker-heartbeat` writes the active project's worker heartbeat.
 - `GET /api/notifications?status=open` returns supervisor alerts.
 - `POST /api/ack-notification` with `{ "id": "..." }` acknowledges one alert.
 - `POST /api/ack-notifications` acknowledges all open alerts for the active project.
