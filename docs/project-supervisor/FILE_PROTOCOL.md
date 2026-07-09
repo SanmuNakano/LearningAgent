@@ -1,0 +1,96 @@
+# AI Project Supervisor File Protocol
+
+This protocol lets the supervisor observe and command a worker AI without depending on one specific AI runtime.
+
+By default, files live under each supervised project:
+
+```text
+.project-supervisor/
+  worker-state.json
+  inbox.jsonl
+  audit.jsonl
+  state.json
+```
+
+The directory is runtime state and should stay ignored by Git.
+
+## Worker Heartbeat
+
+The worker AI writes `.project-supervisor/worker-state.json`.
+
+Example:
+
+```json
+{
+  "projectId": "learning-agent",
+  "workerId": "codex-main",
+  "status": "working",
+  "goal": "Improve AI Project Supervisor",
+  "currentStep": "Run tests and update docs",
+  "plan": [
+    { "step": "Read implementation", "status": "completed" },
+    { "step": "Patch supervisor", "status": "completed" },
+    { "step": "Verify and commit", "status": "in_progress" }
+  ],
+  "lastProgressAt": "2026-07-09T11:10:00.000Z",
+  "lastActivityAt": "2026-07-09T11:12:00.000Z",
+  "needsUserApproval": false,
+  "blocker": null,
+  "updatedAt": "2026-07-09T11:12:00.000Z"
+}
+```
+
+Supported worker statuses:
+
+- `unknown`
+- `working`
+- `waiting`
+- `idle`
+- `stuck`
+- `done`
+
+Supported plan statuses:
+
+- `pending`
+- `in_progress`
+- `completed`
+- `blocked`
+
+## Instruction Inbox
+
+The supervisor appends approved instructions to `.project-supervisor/inbox.jsonl`.
+
+Each line is one JSON object:
+
+```json
+{"id":"abc123","projectId":"learning-agent","targetWorker":"codex-main","instruction":"Run tests and summarize failures.","createdAt":"2026-07-09T11:20:00.000Z","approvedAt":"2026-07-09T11:21:00.000Z","dispatchedAt":"2026-07-09T11:21:01.000Z"}
+```
+
+The worker AI may poll this file or let a runtime adapter consume it.
+
+## Audit Log
+
+The supervisor appends decision events to `.project-supervisor/audit.jsonl`.
+
+Events include:
+
+- `instruction_created`
+- `instruction_approved`
+- `instruction_rejected`
+- `instruction_dispatched`
+
+The audit log is for debugging, review, and future mobile history.
+
+## Mobile Commands
+
+The OpenClaw command surface maps to the protocol:
+
+- `/supervise status` shows project and worker state.
+- `/supervise ai` shows detailed worker heartbeat.
+- `/supervise propose` shows recommended next actions.
+- `/supervise propose <instruction>` creates a pending instruction.
+- `/supervise approve <id>` approves and dispatches a pending instruction.
+- `/supervise reject <id>` rejects a pending instruction.
+- `/supervise tell <instruction>` immediately dispatches a human-approved instruction.
+- `/supervise pending` lists recent supervisor instructions.
+

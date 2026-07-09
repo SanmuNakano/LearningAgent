@@ -2,6 +2,8 @@
 
 OpenClaw plugin that routes QQBot messages to learning specialist agents and exposes a local Project Supervisor for mobile progress monitoring.
 
+Product direction for the cross-project AI supervisor is tracked in [`docs/project-supervisor/PRODUCT.md`](docs/project-supervisor/PRODUCT.md). The file-based worker protocol is documented in [`docs/project-supervisor/FILE_PROTOCOL.md`](docs/project-supervisor/FILE_PROTOCOL.md).
+
 ## Project Supervisor
 
 The supervisor watches a local project, keeps a rolling state file, exposes a mobile-friendly dashboard, and registers an OpenClaw command for phone/chat control.
@@ -33,7 +35,13 @@ OpenClaw commands:
 
 ```text
 /supervise status
+/supervise ai
 /supervise scan
+/supervise propose
+/supervise propose <instruction>
+/supervise approve <instruction-id>
+/supervise reject <instruction-id>
+/supervise tell <instruction>
 /supervise url
 /supervise run build
 /supervise run test

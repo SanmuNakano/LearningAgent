@@ -65,9 +65,30 @@
             "description": "Project directory to supervise",
             "default": "D:\\learn\\openclaw-plugins"
           },
+          "projectId": {
+            "type": "string",
+            "description": "Stable project identifier used in supervisor state and worker instructions"
+          },
           "stateFile": {
             "type": "string",
             "description": "Optional supervisor state file path"
+          },
+          "workerStateFile": {
+            "type": "string",
+            "description": "Optional worker AI heartbeat state file path"
+          },
+          "workerInboxFile": {
+            "type": "string",
+            "description": "Optional JSONL inbox path where approved instructions are dispatched"
+          },
+          "auditFile": {
+            "type": "string",
+            "description": "Optional JSONL audit log path for supervisor decisions"
+          },
+          "defaultWorkerId": {
+            "type": "string",
+            "description": "Default worker AI id when the heartbeat does not report one",
+            "default": "worker-ai"
           },
           "host": {
             "type": "string",
@@ -106,6 +127,11 @@
             "type": "number",
             "description": "Maximum files to scan per pass",
             "default": 8000
+          },
+          "maxInstructions": {
+            "type": "number",
+            "description": "Maximum supervisor instruction records to retain",
+            "default": 200
           },
           "watchedPorts": {
             "type": "array",
