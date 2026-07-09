@@ -81,9 +81,17 @@
             "type": "string",
             "description": "Optional JSONL inbox path where approved instructions are dispatched"
           },
+          "workerOutboxFile": {
+            "type": "string",
+            "description": "Optional JSONL outbox path where worker AI acknowledgement events are reported"
+          },
           "auditFile": {
             "type": "string",
             "description": "Optional JSONL audit log path for supervisor decisions"
+          },
+          "projectRegistryFile": {
+            "type": "string",
+            "description": "Optional central JSON file used to register supervised projects"
           },
           "defaultWorkerId": {
             "type": "string",

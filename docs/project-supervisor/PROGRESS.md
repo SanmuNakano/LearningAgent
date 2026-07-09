@@ -14,3 +14,8 @@
 - Verified `npm run build` and `npm test`; test suite is now 32 passing tests.
 - Restarted the local supervisor panel on port 8791 with the new dashboard/API.
 - Smoke-tested authenticated HTTP instruction flow and direct dispatch to `codex-main`.
+- Started Phase 2: worker acknowledgement outbox plus central project registry foundations.
+- Added `.project-supervisor/outbox.jsonl` support so worker AI can report instruction `received`, `started`, `completed`, `failed`, or `ignored`.
+- Added project registry support and `/supervise projects` / `/supervise register`.
+- Verified Phase 2 build and tests; test suite is now 34 passing tests.
+- Restarted the local supervisor panel and verified `/api/register-project`, `/api/projects`, and refreshed status snapshots.

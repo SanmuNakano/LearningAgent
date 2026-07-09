@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
@@ -178,6 +178,69 @@ describe("ProjectSupervisor", () => {
       expect(audit).toContain("instruction_dispatched");
       expect(state.instructions[0].status).toBe("dispatched");
       await expect(supervisor.rejectInstruction(pending.id)).rejects.toThrow(/already dispatched/);
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
+  it("merges worker outbox acknowledgement events into instruction status", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisorDir = join(projectDir, ".project-supervisor");
+      const outboxFile = join(supervisorDir, "outbox.jsonl");
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(supervisorDir, "state.json"),
+        workerInboxFile: join(supervisorDir, "inbox.jsonl"),
+        workerOutboxFile: outboxFile,
+        auditFile: join(supervisorDir, "audit.jsonl"),
+        autoStartServer: false
+      });
+
+      const dispatched = await supervisor.createInstruction({
+        instruction: "Run the smoke test.",
+        createdBy: "human",
+        source: "mobile",
+        approve: true
+      });
+      await appendFile(outboxFile, JSON.stringify({
+        instructionId: dispatched.id,
+        workerId: dispatched.targetWorker,
+        status: "completed",
+        message: "Smoke test passed.",
+        at: "2026-07-09T11:45:00.000Z"
+      }) + "\n", "utf-8");
+
+      const instructions = await supervisor.listInstructions();
+
+      expect(instructions[0].workerStatus).toBe("completed");
+      expect(instructions[0].workerMessage).toBe("Smoke test passed.");
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
+  it("registers the current project in a central project registry", async () => {
+    const projectDir = await makeProject();
+    try {
+      const registryFile = join(projectDir, ".central-supervisor", "projects.json");
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(projectDir, ".project-supervisor", "state.json"),
+        projectRegistryFile: registryFile,
+        autoStartServer: false
+      });
+
+      const project = await supervisor.registerCurrentProject();
+      const registry = await supervisor.readProjectRegistry();
+      const text = await supervisor.renderProjectsText();
+
+      expect(project.id).toBe("test-project");
+      expect(registry.activeProjectId).toBe("test-project");
+      expect(registry.projects).toHaveLength(1);
+      expect(text).toContain("test-project (active)");
     } finally {
       await removeProject(projectDir);
     }

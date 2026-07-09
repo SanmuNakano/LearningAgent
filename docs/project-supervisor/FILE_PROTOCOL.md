@@ -8,6 +8,7 @@ By default, files live under each supervised project:
 .project-supervisor/
   worker-state.json
   inbox.jsonl
+  outbox.jsonl
   audit.jsonl
   state.json
 ```
@@ -68,6 +69,26 @@ Each line is one JSON object:
 
 The worker AI may poll this file or let a runtime adapter consume it.
 
+## Worker Outbox
+
+The worker AI appends acknowledgement events to `.project-supervisor/outbox.jsonl`.
+
+Each line is one JSON object:
+
+```json
+{"instructionId":"abc123","projectId":"learning-agent","workerId":"codex-main","status":"received","message":"Instruction received.","at":"2026-07-09T11:22:00.000Z"}
+```
+
+Supported instruction event statuses:
+
+- `received`
+- `started`
+- `completed`
+- `failed`
+- `ignored`
+
+The supervisor merges the latest outbox event into instruction status views. If an instruction reports `failed`, project health becomes `blocked` until the failure is reviewed or superseded by a later event.
+
 ## Audit Log
 
 The supervisor appends decision events to `.project-supervisor/audit.jsonl`.
@@ -81,16 +102,45 @@ Events include:
 
 The audit log is for debugging, review, and future mobile history.
 
+## Project Registry
+
+For multi-project supervision, the supervisor keeps a central project registry.
+
+Default location:
+
+```text
+<parent-of-project>/.project-supervisor/projects.json
+```
+
+Example:
+
+```json
+{
+  "activeProjectId": "openclaw-plugins",
+  "projects": [
+    {
+      "id": "openclaw-plugins",
+      "name": "openclaw-plugins",
+      "projectDir": "D:\\learn\\openclaw-plugins",
+      "workerStateFile": "D:\\learn\\openclaw-plugins\\.project-supervisor\\worker-state.json",
+      "addedAt": "2026-07-09T11:30:00.000Z",
+      "lastSeenAt": "2026-07-09T11:30:00.000Z"
+    }
+  ]
+}
+```
+
 ## Mobile Commands
 
 The OpenClaw command surface maps to the protocol:
 
 - `/supervise status` shows project and worker state.
 - `/supervise ai` shows detailed worker heartbeat.
+- `/supervise projects` lists registered projects.
+- `/supervise register` registers the current project in the central registry.
 - `/supervise propose` shows recommended next actions.
 - `/supervise propose <instruction>` creates a pending instruction.
 - `/supervise approve <id>` approves and dispatches a pending instruction.
 - `/supervise reject <id>` rejects a pending instruction.
 - `/supervise tell <instruction>` immediately dispatches a human-approved instruction.
 - `/supervise pending` lists recent supervisor instructions.
-

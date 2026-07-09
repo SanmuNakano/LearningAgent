@@ -18,6 +18,7 @@ export type TaskStatus = "running" | "ok" | "failed" | "timeout";
 export type WorkerStatus = "unknown" | "working" | "waiting" | "idle" | "stuck" | "done";
 export type WorkerStateSource = "file" | "missing" | "invalid";
 export type InstructionStatus = "pending" | "approved" | "rejected" | "dispatched";
+export type WorkerInstructionStatus = "received" | "started" | "completed" | "failed" | "ignored";
 
 export type SupervisorCommand = {
   title: string;
@@ -31,7 +32,9 @@ export type SupervisorConfig = {
   stateFile?: string;
   workerStateFile?: string;
   workerInboxFile?: string;
+  workerOutboxFile?: string;
   auditFile?: string;
+  projectRegistryFile?: string;
   defaultWorkerId?: string;
   host?: string;
   port?: number;
@@ -119,6 +122,32 @@ export type SupervisorInstruction = {
   rejectedAt?: string;
   dispatchedAt?: string;
   rejectReason?: string;
+  workerStatus?: WorkerInstructionStatus;
+  workerMessage?: string;
+  workerUpdatedAt?: string;
+};
+
+export type WorkerInstructionEvent = {
+  instructionId: string;
+  projectId?: string;
+  workerId?: string;
+  status: WorkerInstructionStatus;
+  message?: string;
+  at: string;
+};
+
+export type ProjectRegistryEntry = {
+  id: string;
+  name?: string;
+  projectDir: string;
+  workerStateFile?: string;
+  addedAt: string;
+  lastSeenAt?: string;
+};
+
+export type ProjectRegistry = {
+  activeProjectId?: string;
+  projects: ProjectRegistryEntry[];
 };
 
 export type SupervisorNextAction = {
@@ -145,6 +174,7 @@ export type SupervisorSnapshot = {
   worker: WorkerState;
   instructions: SupervisorInstruction[];
   nextActions: SupervisorNextAction[];
+  projects: ProjectRegistry;
 };
 
 type SupervisorState = {
@@ -235,6 +265,26 @@ async function appendJsonLine(file: string, value: unknown): Promise<void> {
   await fs.appendFile(file, `${JSON.stringify(value)}\n`, "utf-8");
 }
 
+async function readJsonLines(file: string, maxLines: number): Promise<unknown[]> {
+  try {
+    const raw = await fs.readFile(file, "utf-8");
+    const lines = raw.split(/\r?\n/).filter(Boolean).slice(-maxLines);
+    const out: unknown[] = [];
+    for (const line of lines) {
+      try {
+        out.push(JSON.parse(line));
+      } catch {
+        // Ignore malformed worker events; the heartbeat will surface broader invalid state.
+      }
+    }
+    return out;
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
 async function pathExists(target: string): Promise<boolean> {
   try {
     await fs.access(target);
@@ -307,6 +357,13 @@ function optionalNullableString(value: unknown): string | null | undefined {
   return optionalString(value);
 }
 
+function parseWorkerInstructionStatus(value: unknown): WorkerInstructionStatus | null {
+  if (value === "received" || value === "started" || value === "completed" || value === "failed" || value === "ignored") {
+    return value;
+  }
+  return null;
+}
+
 function fallbackWorkerState(params: {
   projectId: string;
   workerId: string;
@@ -323,6 +380,83 @@ function fallbackWorkerState(params: {
     updatedAt: nowIso(),
     error: params.error
   };
+}
+
+async function readWorkerOutbox(file: string): Promise<WorkerInstructionEvent[]> {
+  const rawEvents = await readJsonLines(file, 500);
+  const events: WorkerInstructionEvent[] = [];
+  for (const raw of rawEvents) {
+    if (!isRecord(raw)) continue;
+    const instructionId = optionalString(raw.instructionId) ?? optionalString(raw.id);
+    const status = parseWorkerInstructionStatus(raw.status);
+    if (!instructionId || !status) continue;
+    events.push({
+      instructionId,
+      projectId: optionalString(raw.projectId),
+      workerId: optionalString(raw.workerId),
+      status,
+      message: optionalString(raw.message),
+      at: optionalString(raw.at) ?? optionalString(raw.updatedAt) ?? nowIso()
+    });
+  }
+  return events;
+}
+
+function applyWorkerEventsToInstructions(instructions: SupervisorInstruction[], events: WorkerInstructionEvent[]): SupervisorInstruction[] {
+  const latestByInstruction = new Map<string, WorkerInstructionEvent>();
+  for (const event of events) {
+    const existing = latestByInstruction.get(event.instructionId);
+    if (!existing || Date.parse(event.at) >= Date.parse(existing.at)) {
+      latestByInstruction.set(event.instructionId, event);
+    }
+  }
+  return instructions.map((instruction) => {
+    const event = latestByInstruction.get(instruction.id);
+    if (!event) return instruction;
+    return {
+      ...instruction,
+      workerStatus: event.status,
+      workerMessage: event.message,
+      workerUpdatedAt: event.at
+    };
+  });
+}
+
+function normalizeProjectRegistry(raw: unknown): ProjectRegistry {
+  if (!isRecord(raw)) return { projects: [] };
+  const projects: ProjectRegistryEntry[] = [];
+  if (Array.isArray(raw.projects)) {
+    for (const item of raw.projects) {
+      if (!isRecord(item)) continue;
+      const id = optionalString(item.id);
+      const projectDir = optionalString(item.projectDir);
+      if (!id || !projectDir) continue;
+      projects.push({
+        id,
+        name: optionalString(item.name),
+        projectDir,
+        workerStateFile: optionalString(item.workerStateFile),
+        addedAt: optionalString(item.addedAt) ?? nowIso(),
+        lastSeenAt: optionalString(item.lastSeenAt)
+      });
+    }
+  }
+  return {
+    activeProjectId: optionalString(raw.activeProjectId),
+    projects
+  };
+}
+
+async function readProjectRegistry(file: string): Promise<ProjectRegistry> {
+  const raw = await readJsonFile<unknown>(file, {});
+  return normalizeProjectRegistry(raw);
+}
+
+async function writeProjectRegistry(file: string, registry: ProjectRegistry): Promise<void> {
+  await writeJsonFile(file, {
+    activeProjectId: registry.activeProjectId,
+    projects: registry.projects.sort((a, b) => a.id.localeCompare(b.id))
+  });
 }
 
 async function readWorkerState(cfg: ReturnType<typeof normalizeSupervisorConfig>): Promise<WorkerState> {
@@ -526,6 +660,7 @@ function buildRisks(params: {
 function buildWorkerRisks(worker: WorkerState, instructions: SupervisorInstruction[]): string[] {
   const risks: string[] = [];
   const pending = instructions.filter((instruction) => instruction.status === "pending");
+  const failedInstructions = instructions.filter((instruction) => instruction.workerStatus === "failed");
 
   if (worker.source === "missing") risks.push("Worker AI heartbeat is not connected yet.");
   if (worker.source === "invalid") risks.push(`Worker AI heartbeat is invalid${worker.error ? `: ${worker.error}` : "."}`);
@@ -533,6 +668,7 @@ function buildWorkerRisks(worker: WorkerState, instructions: SupervisorInstructi
   if (worker.status === "waiting" || worker.needsUserApproval) risks.push("Worker AI is waiting for user input or approval.");
   if (worker.blocker) risks.push(`Worker blocker: ${worker.blocker}`);
   if (pending.length > 0) risks.push(`${pending.length} supervisor instruction(s) pending approval.`);
+  if (failedInstructions.length > 0) risks.push(`${failedInstructions.length} dispatched instruction(s) failed in the worker AI.`);
 
   return risks;
 }
@@ -540,6 +676,7 @@ function buildWorkerRisks(worker: WorkerState, instructions: SupervisorInstructi
 function combineHealth(projectHealth: SupervisorHealth, worker: WorkerState, instructions: SupervisorInstruction[]): SupervisorHealth {
   if (projectHealth === "blocked" || worker.status === "stuck") return "blocked";
   if (worker.source === "invalid") return "blocked";
+  if (instructions.some((instruction) => instruction.workerStatus === "failed")) return "blocked";
   if (projectHealth === "watch") return "watch";
   if (worker.source === "missing" || worker.status === "waiting" || worker.needsUserApproval) return "watch";
   if (instructions.some((instruction) => instruction.status === "pending")) return "watch";
@@ -557,6 +694,7 @@ function buildNextActions(params: {
   const failed = params.tasks.filter((task) => task.status === "failed" || task.status === "timeout");
   const running = params.tasks.filter((task) => task.status === "running");
   const pending = params.instructions.filter((instruction) => instruction.status === "pending");
+  const failedInstructions = params.instructions.filter((instruction) => instruction.workerStatus === "failed");
 
   if (failed.length > 0) {
     actions.push({
@@ -565,6 +703,16 @@ function buildNextActions(params: {
       title: "Inspect failed supervised task",
       detail: `${failed.length} command task(s) failed or timed out. Review the latest task log before continuing.`,
       command: "/supervise status"
+    });
+  }
+
+  if (failedInstructions.length > 0) {
+    actions.push({
+      id: "review-failed-instruction",
+      priority: "high",
+      title: "Review failed worker instruction",
+      detail: failedInstructions[failedInstructions.length - 1].workerMessage ?? "The worker AI reported an instruction failure.",
+      command: "/supervise pending"
     });
   }
 
@@ -662,6 +810,7 @@ export function normalizeSupervisorConfig(input: SupervisorConfig = {}): Require
   const projectDir = path.resolve(input.projectDir ?? DEFAULT_PROJECT_DIR);
   const stateFile = path.resolve(input.stateFile ?? path.join(projectDir, ".project-supervisor", "state.json"));
   const stateDir = path.dirname(stateFile);
+  const supervisorHome = path.resolve(process.env.OPENCLAW_SUPERVISOR_HOME ?? path.join(path.dirname(projectDir), ".project-supervisor"));
   const projectId = input.projectId?.trim() || path.basename(projectDir).toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "project";
   return {
     projectId,
@@ -669,7 +818,9 @@ export function normalizeSupervisorConfig(input: SupervisorConfig = {}): Require
     stateFile,
     workerStateFile: path.resolve(input.workerStateFile ?? path.join(stateDir, "worker-state.json")),
     workerInboxFile: path.resolve(input.workerInboxFile ?? path.join(stateDir, "inbox.jsonl")),
+    workerOutboxFile: path.resolve(input.workerOutboxFile ?? path.join(stateDir, "outbox.jsonl")),
     auditFile: path.resolve(input.auditFile ?? path.join(stateDir, "audit.jsonl")),
+    projectRegistryFile: path.resolve(input.projectRegistryFile ?? path.join(supervisorHome, "projects.json")),
     defaultWorkerId: input.defaultWorkerId?.trim() || "worker-ai",
     host: input.host ?? "127.0.0.1",
     port: parsePositiveInt(input.port, DEFAULT_PORT),
@@ -755,13 +906,50 @@ export class ProjectSupervisor {
     await writeJsonFile(this.cfg.stateFile, state);
   }
 
+  async readProjectRegistry(): Promise<ProjectRegistry> {
+    return await readProjectRegistry(this.cfg.projectRegistryFile);
+  }
+
+  async registerCurrentProject(): Promise<ProjectRegistryEntry> {
+    const registry = await this.readProjectRegistry();
+    const now = nowIso();
+    const entry: ProjectRegistryEntry = {
+      id: this.cfg.projectId,
+      name: this.cfg.projectId,
+      projectDir: this.cfg.projectDir,
+      workerStateFile: this.cfg.workerStateFile,
+      addedAt: now,
+      lastSeenAt: now
+    };
+    const existingIndex = registry.projects.findIndex((project) => project.id === entry.id);
+    if (existingIndex >= 0) {
+      const existing = registry.projects[existingIndex];
+      registry.projects[existingIndex] = {
+        ...existing,
+        projectDir: entry.projectDir,
+        workerStateFile: entry.workerStateFile,
+        lastSeenAt: now
+      };
+    } else {
+      registry.projects.push(entry);
+    }
+    registry.activeProjectId = this.cfg.projectId;
+    await writeProjectRegistry(this.cfg.projectRegistryFile, registry);
+    await this.audit("project_registered", entry);
+    return existingIndex >= 0 ? registry.projects[existingIndex] : entry;
+  }
+
   async scan(): Promise<SupervisorSnapshot> {
     if (!await pathExists(this.cfg.projectDir)) {
       throw new Error(`Project directory does not exist: ${this.cfg.projectDir}`);
     }
     const state = await this.readState();
     const tasks = [...state.tasks, ...this.runningTasks.values()].slice(-this.cfg.maxHistory);
-    const instructions = state.instructions.slice(-this.cfg.maxInstructions);
+    const [outboxEvents, registry] = await Promise.all([
+      readWorkerOutbox(this.cfg.workerOutboxFile),
+      this.readProjectRegistry()
+    ]);
+    const instructions = applyWorkerEventsToInstructions(state.instructions.slice(-this.cfg.maxInstructions), outboxEvents);
     const [fileScan, git, packageScripts, ports, logTails, worker] = await Promise.all([
       scanFiles(this.cfg.projectDir, { maxFiles: this.cfg.maxFiles, ignoreDirs: this.cfg.ignoreDirs }),
       scanGit(this.cfg.projectDir),
@@ -792,7 +980,8 @@ export class ProjectSupervisor {
       tasks,
       worker,
       instructions: instructions.slice(-20),
-      nextActions
+      nextActions,
+      projects: registry
     };
     state.snapshots.push(snapshot);
     state.tasks = tasks.filter((task, index, list) => list.findIndex((other) => other.id === task.id) === index).slice(-this.cfg.maxHistory);
@@ -816,7 +1005,8 @@ export class ProjectSupervisor {
 
   async listInstructions(status?: InstructionStatus): Promise<SupervisorInstruction[]> {
     const state = await this.readState();
-    const instructions = state.instructions.slice(-this.cfg.maxInstructions);
+    const events = await readWorkerOutbox(this.cfg.workerOutboxFile);
+    const instructions = applyWorkerEventsToInstructions(state.instructions.slice(-this.cfg.maxInstructions), events);
     return status ? instructions.filter((instruction) => instruction.status === status) : instructions;
   }
 
@@ -1014,10 +1204,25 @@ export class ProjectSupervisor {
     const instructions = (await this.listInstructions(status)).slice(-8).reverse();
     if (instructions.length === 0) return status ? `No ${status} supervisor instructions.` : "No supervisor instructions.";
     return instructions.map((instruction) => [
-      `${instruction.id} [${instruction.status}] -> ${instruction.targetWorker}`,
+      `${instruction.id} [${instruction.status}${instruction.workerStatus ? `/${instruction.workerStatus}` : ""}] -> ${instruction.targetWorker}`,
       instruction.instruction,
+      instruction.workerMessage ? `worker: ${instruction.workerMessage}` : null,
       `created: ${instruction.createdAt}${instruction.dispatchedAt ? `, dispatched: ${instruction.dispatchedAt}` : ""}`
-    ].join("\n")).join("\n\n");
+    ].filter((line) => line !== null).join("\n")).join("\n\n");
+  }
+
+  async renderProjectsText(): Promise<string> {
+    const registry = await this.readProjectRegistry();
+    if (registry.projects.length === 0) return "No projects registered yet. Use /supervise register to add the current project.";
+    return [
+      `Active project: ${registry.activeProjectId ?? "(none)"}`,
+      ...registry.projects.map((project) => [
+        `${project.id}${project.id === registry.activeProjectId ? " (active)" : ""}`,
+        `  dir: ${project.projectDir}`,
+        `  worker: ${project.workerStateFile ?? "(default)"}`,
+        `  last seen: ${project.lastSeenAt ?? "(never)"}`
+      ].join("\n"))
+    ].join("\n");
   }
 
   getPanelUrl(): string {
@@ -1073,8 +1278,16 @@ export class ProjectSupervisor {
       json(res, 200, { instructions: await this.listInstructions(parsedStatus) });
       return true;
     }
+    if (req.method === "GET" && parsed.pathname === "/api/projects") {
+      json(res, 200, { registry: await this.readProjectRegistry() });
+      return true;
+    }
     if (req.method === "POST" && parsed.pathname === "/api/scan") {
       json(res, 200, { snapshot: await this.scan() });
+      return true;
+    }
+    if (req.method === "POST" && parsed.pathname === "/api/register-project") {
+      json(res, 200, { project: await this.registerCurrentProject(), registry: await this.readProjectRegistry() });
       return true;
     }
     if (req.method === "POST" && parsed.pathname === "/api/run") {
@@ -1260,7 +1473,9 @@ function configFromPluginApi(api: any): SupervisorConfig {
     stateFile: typeof raw.stateFile === "string" ? raw.stateFile : undefined,
     workerStateFile: typeof raw.workerStateFile === "string" ? raw.workerStateFile : undefined,
     workerInboxFile: typeof raw.workerInboxFile === "string" ? raw.workerInboxFile : undefined,
+    workerOutboxFile: typeof raw.workerOutboxFile === "string" ? raw.workerOutboxFile : undefined,
     auditFile: typeof raw.auditFile === "string" ? raw.auditFile : undefined,
+    projectRegistryFile: typeof raw.projectRegistryFile === "string" ? raw.projectRegistryFile : undefined,
     defaultWorkerId: typeof raw.defaultWorkerId === "string" ? raw.defaultWorkerId : undefined,
     host: typeof raw.host === "string" ? raw.host : undefined,
     publicUrl: typeof raw.publicUrl === "string" ? raw.publicUrl : undefined,
@@ -1330,6 +1545,11 @@ export function registerProjectSupervisor(api: any): void {
       if (!args || /^status$/i.test(args)) return { text: await supervisor.renderTextStatus(false) };
       if (/^ai$/i.test(args)) return { text: await supervisor.renderWorkerText() };
       if (/^(pending|instructions)$/i.test(args)) return { text: await supervisor.renderInstructionsText() };
+      if (/^projects$/i.test(args)) return { text: await supervisor.renderProjectsText() };
+      if (/^(register|register-project)$/i.test(args)) {
+        const project = await supervisor.registerCurrentProject();
+        return { text: `Registered project ${project.id}:\n${project.projectDir}` };
+      }
       if (/^(scan|refresh)$/i.test(args)) return { text: await supervisor.renderTextStatus(true) };
       if (/^(url|panel)$/i.test(args)) return { text: `Project Supervisor panel:\n${supervisor.getPanelUrl()}` };
       const proposeMatch = /^propose(?:\s+([\s\S]+))?$/i.exec(args);
@@ -1372,6 +1592,8 @@ export function registerProjectSupervisor(api: any): void {
           "Project Supervisor commands:",
           "/supervise status",
           "/supervise ai",
+          "/supervise projects",
+          "/supervise register",
           "/supervise scan",
           "/supervise propose",
           "/supervise propose <instruction>",
