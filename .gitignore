@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+coverage/
+
+# Project Supervisor runtime state
+.project-supervisor/
+.project-supervisor-*/
+*.log
+
+# Local environment and editor state
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+
+# OS noise
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Package manager caches
+.npm/
+.pnpm-store/

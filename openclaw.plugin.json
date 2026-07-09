@@ -1,0 +1,152 @@
+{
+  "id": "qq-study-router",
+  "name": "QQ Study Router",
+  "description": "Route QQBot messages to learning specialist agents and supervise local project progress from OpenClaw/mobile.",
+  "version": "0.4.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "embeddingModel": {
+        "type": "string",
+        "description": "Embedding model for semantic routing",
+        "default": "text-embedding-3-small"
+      },
+      "embeddingProvider": {
+        "type": "string",
+        "description": "Provider ID for embedding API calls",
+        "default": "sorux-chat"
+      },
+      "semanticThreshold": {
+        "type": "number",
+        "description": "Minimum cosine similarity for confident semantic routing (0-1)",
+        "default": 0.38
+      },
+      "semanticMargin": {
+        "type": "number",
+        "description": "Minimum score gap between best and second-best route for confident semantic routing (0-1)",
+        "default": 0.12
+      },
+      "classifierModel": {
+        "type": "string",
+        "description": "Model for LLM classifier fallback when semantic confidence is low",
+        "default": "deepseek-v4-flash"
+      },
+      "classifierProvider": {
+        "type": "string",
+        "description": "Provider ID for classifier LLM calls",
+        "default": "sorux-chat"
+      },
+      "enableCascade": {
+        "type": "boolean",
+        "description": "Enable cascade escalation from specialists to deep-expert via ESCALATE signal",
+        "default": true
+      },
+      "contextWindowSize": {
+        "type": "number",
+        "description": "Number of recent turns to include when routing follow-up messages",
+        "default": 4
+      },
+      "workspaceDir": {
+        "type": "string",
+        "description": "Workspace directory shared by the learning agents"
+      },
+      "embeddingCacheFile": {
+        "type": "string",
+        "description": "Optional path for the semantic route embedding cache"
+      },
+      "projectSupervisor": {
+        "type": "object",
+        "description": "Local project progress supervisor and mobile dashboard settings",
+        "additionalProperties": false,
+        "properties": {
+          "projectDir": {
+            "type": "string",
+            "description": "Project directory to supervise",
+            "default": "D:\\learn\\openclaw-plugins"
+          },
+          "stateFile": {
+            "type": "string",
+            "description": "Optional supervisor state file path"
+          },
+          "host": {
+            "type": "string",
+            "description": "Local dashboard bind host",
+            "default": "127.0.0.1"
+          },
+          "port": {
+            "type": "number",
+            "description": "Local dashboard port",
+            "default": 8791
+          },
+          "publicUrl": {
+            "type": "string",
+            "description": "Optional externally reachable dashboard URL"
+          },
+          "token": {
+            "type": "string",
+            "description": "Optional fixed dashboard token. If omitted, one is generated in state."
+          },
+          "autoStartServer": {
+            "type": "boolean",
+            "description": "Start the local dashboard when the plugin starts",
+            "default": true
+          },
+          "scanIntervalMs": {
+            "type": "number",
+            "description": "Background scan interval in milliseconds",
+            "default": 60000
+          },
+          "staleAfterMs": {
+            "type": "number",
+            "description": "Mark project blocked when no file activity is seen after this window",
+            "default": 14400000
+          },
+          "maxFiles": {
+            "type": "number",
+            "description": "Maximum files to scan per pass",
+            "default": 8000
+          },
+          "watchedPorts": {
+            "type": "array",
+            "description": "Local ports expected to be open while the project is running",
+            "items": { "type": "number" }
+          },
+          "logFiles": {
+            "type": "array",
+            "description": "Project-relative log files to tail in the dashboard",
+            "items": { "type": "string" }
+          },
+          "ignoreDirs": {
+            "type": "array",
+            "description": "Additional directory names to skip during scans",
+            "items": { "type": "string" }
+          },
+          "allowedCommands": {
+            "type": "object",
+            "description": "Named shell commands that may be started from mobile",
+            "additionalProperties": {
+              "anyOf": [
+                { "type": "string" },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "title": { "type": "string" },
+                    "command": { "type": "string" },
+                    "timeoutMs": { "type": "number" }
+                  },
+                  "required": ["command"]
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {}
+}
