@@ -26,6 +26,7 @@
 
 - `src/supervisor.ts` owns project scanning orchestration, active-project routing, and the backward-compatible public core classes.
 - `src/supervisor-services.ts` owns worker state/inbox/outbox behavior, supervisor instruction lifecycle, and notification delivery/acknowledgement behavior.
+- `src/supervisor-storage.ts` defines the replaceable supervisor-state storage interface and the default atomic JSON implementation.
 - `src/quota.ts` owns Codex account metadata, quota windows, observations, log-source metadata, cursors, and quota notifications.
 
 ### Ingestion Adapters
@@ -47,6 +48,11 @@ index
 supervisor executable
   --dynamic--> supervisor-cli
                   -> supervisor core
+
+supervisor core
+  -> supervisor state storage interface
+       -> atomic JSON storage (default)
+       -> SQLite storage (future, optional)
 ```
 
 Platform adapters may depend on the core. The core must not import OpenClaw. The CLI is dynamically loaded to preserve the historical `node dist/supervisor.js` entry without introducing a static circular dependency.
@@ -54,6 +60,7 @@ Platform adapters may depend on the core. The core must not import OpenClaw. The
 ## State Ownership
 
 - Per-project runtime state stays under `<project>/.project-supervisor/`.
+- `ProjectSupervisor` receives its state backend through `SupervisorStateStorage`; existing callers use `JsonSupervisorStateStorage` automatically.
 - Cross-project registry and Codex account/quota state stay under the supervisor home directory.
 - Worker interoperability remains file-based (`worker-state.json`, `inbox.jsonl`, `outbox.jsonl`).
 - Raw Codex log messages are never persisted by the quota subsystem.
@@ -66,6 +73,8 @@ No major feature should be added to `supervisor.ts` until these stages are compl
 2. Extract project scanning and health/signal evaluation.
 3. ~~Replace duplicated `ProjectSupervisor`/`ProjectSupervisorHub` HTTP route branches with one controller/router.~~ Completed in Phase 13.
 4. ~~Extract instruction, worker, and notification services from the core class.~~ Completed in Phase 13.
-5. Introduce a storage interface before migrating project state from JSON to SQLite.
+5. ~~Introduce a storage interface before migrating project state from JSON to SQLite.~~ Completed in Phase 13.
 
 Each stage must preserve the public API, OpenClaw command surface, standalone CLI, file protocol, and full test suite.
+
+Phase 13 architecture stabilization is complete. A SQLite backend is now possible without changing `ProjectSupervisor`, but should only be added when query, retention, or concurrency requirements justify the migration.

@@ -54,4 +54,11 @@ describe("supervisor architecture boundaries", () => {
     expect(services).toContain("export class InstructionService");
     expect(services).toContain("export class NotificationService");
   });
+
+  it("keeps persistent supervisor state behind the storage adapter", async () => {
+    const core = await readFile(new URL("./supervisor.ts", import.meta.url), "utf-8");
+    expect(core).toContain("new JsonSupervisorStateStorage(this.cfg.stateFile)");
+    expect(core).not.toContain("writeJsonFile(this.cfg.stateFile");
+    expect(core).not.toContain("readJsonFile<unknown>(this.cfg.stateFile");
+  });
 });

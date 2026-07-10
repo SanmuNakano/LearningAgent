@@ -95,3 +95,8 @@
 - Extracted worker heartbeat/inbox/outbox behavior, instruction approval/dispatch behavior, and notification delivery/acknowledgement behavior into dedicated services.
 - Kept the `ProjectSupervisor` public API as a compatibility facade and added a boundary guard against lifecycle logic moving back into the core class.
 - Verified the service extraction with `npm run check`; the suite is now 66 passing tests.
+- Added `SupervisorStateStorage` and injectable storage support to `ProjectSupervisor`.
+- Added a default `JsonSupervisorStateStorage` with normalized reads, serialized writes, atomic temporary-file replacement, and failed-write cleanup.
+- Kept worker heartbeat/inbox/outbox files outside the state backend so the cross-process worker protocol remains stable.
+- Added tests for missing/malformed state, concurrent atomic writes, temporary-file cleanup, and an injected in-memory backend.
+- Completed Phase 13 architecture stabilization; `npm run check` now passes 70 tests.

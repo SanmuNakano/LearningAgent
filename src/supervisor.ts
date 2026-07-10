@@ -24,6 +24,9 @@ import {
 } from "./supervisor-http.js";
 import { handleSupervisorHttp } from "./supervisor-controller.js";
 import { InstructionService, NotificationService, WorkerService } from "./supervisor-services.js";
+import { JsonSupervisorStateStorage, type SupervisorStateStorage } from "./supervisor-storage.js";
+export { JsonSupervisorStateStorage, emptySupervisorState, normalizeSupervisorState } from "./supervisor-storage.js";
+export type { SupervisorStateStorage } from "./supervisor-storage.js";
 import { normalizeSupervisorConfig, type NormalizedSupervisorConfig } from "./supervisor-config.js";
 export { normalizeSupervisorConfig } from "./supervisor-config.js";
 import { checkPort, readLogTails, readPackageScripts, scanFiles, scanGit } from "./project-scanner.js";
@@ -197,17 +200,6 @@ async function writeProjectRegistry(file: string, registry: ProjectRegistry): Pr
   });
 }
 
-function normalizeState(raw: unknown): SupervisorState {
-  if (!isRecord(raw)) return { snapshots: [], tasks: [], instructions: [], notifications: [] };
-  return {
-    token: typeof raw.token === "string" ? raw.token : undefined,
-    snapshots: Array.isArray(raw.snapshots) ? raw.snapshots as SupervisorSnapshot[] : [],
-    tasks: Array.isArray(raw.tasks) ? raw.tasks as TaskRecord[] : [],
-    instructions: Array.isArray(raw.instructions) ? raw.instructions as SupervisorInstruction[] : [],
-    notifications: Array.isArray(raw.notifications) ? raw.notifications as SupervisorNotification[] : []
-  };
-}
-
 function projectEntryFromConfig(cfg: NormalizedSupervisorConfig, existing?: ProjectRegistryEntry, seenAt = nowIso()): ProjectRegistryEntry {
   return {
     id: cfg.projectId,
@@ -271,11 +263,13 @@ export class ProjectSupervisor {
   private readonly workerService: WorkerService;
   private readonly instructionService: InstructionService;
   private readonly notificationService: NotificationService;
+  private readonly stateStorage: SupervisorStateStorage;
 
-  constructor(config: SupervisorConfig = {}, logger: Logger = {}) {
+  constructor(config: SupervisorConfig = {}, logger: Logger = {}, stateStorage?: SupervisorStateStorage) {
     this.cfg = normalizeSupervisorConfig(config);
     this.logger = logger;
     this.token = this.cfg.token;
+    this.stateStorage = stateStorage ?? new JsonSupervisorStateStorage(this.cfg.stateFile);
     const dependencies = {
       readState: () => this.readState(),
       writeState: (state: SupervisorState) => this.writeState(state),
@@ -325,8 +319,7 @@ export class ProjectSupervisor {
   }
 
   async readState(): Promise<SupervisorState> {
-    const raw = await readJsonFile<unknown>(this.cfg.stateFile, {});
-    return normalizeState(raw);
+    return await this.stateStorage.read();
   }
 
   async writeState(state: SupervisorState): Promise<void> {
@@ -335,7 +328,7 @@ export class ProjectSupervisor {
     state.instructions = state.instructions.slice(-this.cfg.maxInstructions);
     state.notifications = state.notifications.slice(-this.cfg.maxNotifications);
     if (this.token) state.token = this.token;
-    await writeJsonFile(this.cfg.stateFile, state);
+    await this.stateStorage.write(state);
   }
 
   async readProjectRegistry(): Promise<ProjectRegistry> {
