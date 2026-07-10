@@ -77,6 +77,8 @@ describe("ProjectSupervisor", () => {
     expect(cfg.port).toBe(8791);
     expect(cfg.instructionAckTimeoutMs).toBe(15 * 60_000);
     expect(cfg.instructionProgressTimeoutMs).toBe(2 * 60 * 60_000);
+    expect(cfg.auditRetentionDays).toBe(90);
+    expect(cfg.maxAuditEntries).toBe(10_000);
     expect(Object.keys(cfg.allowedCommands)).toEqual(["smoke"]);
     expect(cfg.allowedCommands.smoke.command).toContain("node -e");
   });
@@ -507,8 +509,49 @@ describe("ProjectSupervisor", () => {
       expect(inbox).toContain("Run tests and report the result.");
       expect(audit).toContain("instruction_created");
       expect(audit).toContain("instruction_dispatched");
+      await expect(supervisor.queryAuditLog({ event: "instruction_created" })).resolves.toMatchObject([
+        { event: "instruction_created" }
+      ]);
       expect(state.instructions[0].status).toBe("dispatched");
       await expect(supervisor.rejectInstruction(pending.id)).rejects.toThrow(/already dispatched/);
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
+  it("exposes audit queries and history retention over HTTP", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisorDir = join(projectDir, ".project-supervisor");
+      const auditFile = join(supervisorDir, "audit.jsonl");
+      await mkdir(supervisorDir, { recursive: true });
+      await appendFile(auditFile, `${JSON.stringify({ event: "expired", at: "2025-01-01T00:00:00.000Z", payload: {} })}\n`, "utf-8");
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(supervisorDir, "state.json"),
+        auditFile,
+        auditRetentionDays: 30,
+        maxAuditEntries: 100,
+        autoStartServer: false
+      });
+      await supervisor.createInstruction({ instruction: "Inspect audit history." });
+      const token = await supervisor.ensureToken();
+      const auditResponse = makeResponse();
+      await supervisor.handleHttp({
+        method: "GET",
+        url: `/api/audit?token=${token}&event=instruction_created&limit=5`,
+        headers: { host: "localhost" }
+      } as any, auditResponse as any);
+      const auditBody = JSON.parse(auditResponse.body);
+      expect(auditResponse.statusCode).toBe(200);
+      expect(auditBody.entries).toHaveLength(1);
+      expect(auditBody.entries[0].event).toBe("instruction_created");
+
+      const maintenanceResponse = makeResponse();
+      await supervisor.handleHttp(makeJsonRequest("POST", `/api/maintenance/history?token=${token}`, { actor: "test" }) as any, maintenanceResponse as any);
+      expect(JSON.parse(maintenanceResponse.body).result.removed).toBe(1);
+      expect(await readFile(auditFile, "utf-8")).not.toContain("expired");
     } finally {
       await removeProject(projectDir);
     }
@@ -547,6 +590,69 @@ describe("ProjectSupervisor", () => {
 
       expect(instructions[0].workerStatus).toBe("completed");
       expect(instructions[0].workerMessage).toBe("Smoke test passed.");
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
+  it("resolves a failed instruction and clears its supervision signal", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(projectDir, ".project-supervisor", "state.json"),
+        autoStartServer: false,
+        maxFiles: 100
+      });
+      const instruction = await supervisor.createInstruction({ instruction: "Run a failing check.", approve: true, source: "system" });
+      await supervisor.acknowledgeWorkerInstruction({ instructionId: instruction.id, status: "failed", message: "Check failed." });
+      const failedSnapshot = await supervisor.scan();
+
+      const resolved = await supervisor.resolveInstruction(instruction.id, { status: "resolved", resolvedBy: "test", note: "Verified manually." });
+      const resolvedSnapshot = await supervisor.scan();
+
+      expect(failedSnapshot.signals.some((signal) => signal.id === "worker-instruction-failed")).toBe(true);
+      expect(resolved).toMatchObject({ resolutionStatus: "resolved", resolutionBy: "test", resolutionNote: "Verified manually." });
+      expect(resolvedSnapshot.signals.some((signal) => signal.id === "worker-instruction-failed")).toBe(false);
+      expect(resolvedSnapshot.risks.some((risk) => risk.includes("instruction(s) failed"))).toBe(false);
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
+  it("supersedes failures only with completed replacements and supports HTTP manual close", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(projectDir, ".project-supervisor", "state.json"),
+        autoStartServer: false,
+        maxFiles: 100
+      });
+      const failed = await supervisor.createInstruction({ instruction: "Old approach.", approve: true, source: "system" });
+      await supervisor.acknowledgeWorkerInstruction({ instructionId: failed.id, status: "failed" });
+      const replacement = await supervisor.createInstruction({ instruction: "Replacement approach.", approve: true, source: "system" });
+      await expect(supervisor.resolveInstruction(failed.id, { status: "superseded", supersededByInstructionId: replacement.id })).rejects.toThrow("not completed");
+      await supervisor.acknowledgeWorkerInstruction({ instructionId: replacement.id, status: "completed" });
+
+      const superseded = await supervisor.resolveInstruction(failed.id, { status: "superseded", supersededByInstructionId: replacement.id, resolvedBy: "test" });
+      const ignored = await supervisor.createInstruction({ instruction: "Skipped instruction.", approve: true, source: "system" });
+      await supervisor.acknowledgeWorkerInstruction({ instructionId: ignored.id, status: "ignored" });
+      const token = await supervisor.ensureToken();
+      const response = makeResponse();
+      await supervisor.handleHttp(makeJsonRequest("POST", `/api/resolve-instruction?token=${token}`, {
+        id: ignored.id,
+        status: "closed",
+        resolvedBy: "dashboard",
+        note: "No longer needed."
+      }) as any, response as any);
+      const closed = (await supervisor.listInstructions()).find((entry) => entry.id === ignored.id);
+
+      expect(superseded).toMatchObject({ resolutionStatus: "superseded", supersededByInstructionId: replacement.id });
+      expect(response.statusCode).toBe(200);
+      expect(closed).toMatchObject({ resolutionStatus: "closed", resolutionBy: "dashboard", resolutionNote: "No longer needed." });
     } finally {
       await removeProject(projectDir);
     }
@@ -830,6 +936,7 @@ describe("ProjectSupervisor", () => {
         projectDir: projectA,
         stateFile: join(projectA, ".project-supervisor", "state.json"),
         projectRegistryFile: registryFile,
+        accountRegistryFile: join(projectA, ".central-supervisor", "accounts.json"),
         autoStartServer: false,
         maxFiles: 100
       });
@@ -854,6 +961,82 @@ describe("ProjectSupervisor", () => {
       expect(overview.activeProject.id).toBe("project-b");
       expect(instruction.projectId).toBe("project-b");
       expect(inbox).toContain("Continue project B and report status.");
+    } finally {
+      await removeProject(projectA);
+      await removeProject(projectB);
+    }
+  });
+
+  it("background-scans inactive projects and aggregates their alerts", async () => {
+    const projectA = await makeProject();
+    const projectB = await makeProject();
+    try {
+      const registryFile = join(projectA, ".central-supervisor", "projects.json");
+      const workerDirB = join(projectB, ".project-supervisor");
+      await mkdir(workerDirB, { recursive: true });
+      await writeFile(join(workerDirB, "worker-state.json"), JSON.stringify({
+        projectId: "project-b",
+        workerId: "worker-b",
+        status: "working",
+        currentStep: "Waiting on a failing dependency",
+        blocker: "Dependency unavailable",
+        lastProgressAt: "2000-01-01T00:00:00.000Z",
+        updatedAt: "2000-01-01T00:00:00.000Z"
+      }), "utf-8");
+      const hub = new ProjectSupervisorHub({
+        projectId: "project-a",
+        projectDir: projectA,
+        stateFile: join(projectA, ".project-supervisor", "state.json"),
+        projectRegistryFile: registryFile,
+        accountRegistryFile: join(projectA, ".central-supervisor", "accounts.json"),
+        autoStartServer: false,
+        maxFiles: 100
+      });
+      await hub.registerCurrentProject();
+      await hub.registerProject(projectB, "project-b");
+      await hub.activateProject("project-a");
+
+      const summaries = await hub.scanAllProjects();
+      const overview = await hub.getOverview();
+      const alerts = await hub.listNotifications("open");
+      const projectBAlert = alerts.find((notification) => notification.projectId === "project-b");
+
+      expect(summaries.map((summary) => summary.projectId)).toEqual(["project-a", "project-b"]);
+      expect(overview.activeProject.id).toBe("project-a");
+      expect(overview.projectSummaries).toHaveLength(2);
+      expect(overview.projectSummaries.find((summary) => summary.projectId === "project-b")?.openAlerts).toBeGreaterThan(0);
+      expect(projectBAlert).toBeDefined();
+      expect((await hub.listNotificationOutbox()).some((notification) => notification.id === projectBAlert?.id)).toBe(true);
+      expect((await hub.acknowledgeNotification(projectBAlert?.id ?? "", "test")).status).toBe("acknowledged");
+    } finally {
+      await removeProject(projectA);
+      await removeProject(projectB);
+    }
+  });
+
+  it("continues scanning healthy projects when one registered directory is missing", async () => {
+    const projectA = await makeProject();
+    const projectB = await makeProject();
+    try {
+      const hub = new ProjectSupervisorHub({
+        projectId: "project-a",
+        projectDir: projectA,
+        stateFile: join(projectA, ".project-supervisor", "state.json"),
+        projectRegistryFile: join(projectA, ".central-supervisor", "projects.json"),
+        accountRegistryFile: join(projectA, ".central-supervisor", "accounts.json"),
+        autoStartServer: false,
+        maxFiles: 100
+      });
+      await hub.registerCurrentProject();
+      await hub.registerProject(projectB, "missing-project");
+      await hub.activateProject("project-a");
+      await removeProject(projectB);
+
+      const summaries = await hub.scanAllProjects();
+
+      expect(summaries.find((summary) => summary.projectId === "project-a")?.scanError).toBeUndefined();
+      expect(summaries.find((summary) => summary.projectId === "missing-project")).toMatchObject({ health: "blocked" });
+      expect(summaries.find((summary) => summary.projectId === "missing-project")?.scanError).toContain("does not exist");
     } finally {
       await removeProject(projectA);
       await removeProject(projectB);

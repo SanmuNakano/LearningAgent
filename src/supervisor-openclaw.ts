@@ -2,10 +2,12 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   ProjectSupervisorHub,
   type SupervisorCommand,
-  type SupervisorConfig
+  type SupervisorConfig,
+  type WorkerRuntimeConfig
 } from "./supervisor.js";
 import { NotificationDeliveryWorker, WebhookNotificationDeliveryAdapter } from "./notification-delivery.js";
 import { stripUrlToken } from "./supervisor-http.js";
+import { ManagedCodexWorkerRuntime } from "./managed-worker-runtime.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -21,6 +23,25 @@ function configFromPluginApi(api: any): SupervisorConfig {
         : {};
   const raw = isRecord(pluginConfig.projectSupervisor) ? pluginConfig.projectSupervisor : pluginConfig;
   const allowedCommands = isRecord(raw.allowedCommands) ? raw.allowedCommands as Record<string, string | SupervisorCommand> : undefined;
+  const runtimeRaw = isRecord(raw.workerRuntime) ? raw.workerRuntime : {};
+  const providerRaw = isRecord(runtimeRaw.provider) ? runtimeRaw.provider : undefined;
+  const workerRuntime: WorkerRuntimeConfig = {
+    enabled: typeof runtimeRaw.enabled === "boolean" ? runtimeRaw.enabled : undefined,
+    workerId: typeof runtimeRaw.workerId === "string" ? runtimeRaw.workerId : undefined,
+    model: typeof runtimeRaw.model === "string" ? runtimeRaw.model : undefined,
+    profile: typeof runtimeRaw.profile === "string" ? runtimeRaw.profile : undefined,
+    sandbox: runtimeRaw.sandbox === "read-only" || runtimeRaw.sandbox === "workspace-write" ? runtimeRaw.sandbox : undefined,
+    pollIntervalMs: typeof runtimeRaw.pollIntervalMs === "number" ? runtimeRaw.pollIntervalMs : undefined,
+    timeoutMs: typeof runtimeRaw.timeoutMs === "number" ? runtimeRaw.timeoutMs : undefined,
+    provider: providerRaw && typeof providerRaw.id === "string" && typeof providerRaw.baseUrl === "string" && typeof providerRaw.envKey === "string"
+      ? {
+          id: providerRaw.id,
+          baseUrl: providerRaw.baseUrl,
+          envKey: providerRaw.envKey,
+          wireApi: providerRaw.wireApi === "chat" || providerRaw.wireApi === "responses" ? providerRaw.wireApi : undefined
+        }
+      : undefined
+  };
   return {
     projectId: typeof raw.projectId === "string" ? raw.projectId : undefined,
     projectDir: typeof raw.projectDir === "string" ? raw.projectDir : undefined,
@@ -45,6 +66,8 @@ function configFromPluginApi(api: any): SupervisorConfig {
     maxHistory: typeof raw.maxHistory === "number" ? raw.maxHistory : undefined,
     maxInstructions: typeof raw.maxInstructions === "number" ? raw.maxInstructions : undefined,
     maxNotifications: typeof raw.maxNotifications === "number" ? raw.maxNotifications : undefined,
+    auditRetentionDays: typeof raw.auditRetentionDays === "number" ? raw.auditRetentionDays : undefined,
+    maxAuditEntries: typeof raw.maxAuditEntries === "number" ? raw.maxAuditEntries : undefined,
     maxTaskLogChars: typeof raw.maxTaskLogChars === "number" ? raw.maxTaskLogChars : undefined,
     commandTimeoutMs: typeof raw.commandTimeoutMs === "number" ? raw.commandTimeoutMs : undefined,
     notificationCooldownMs: typeof raw.notificationCooldownMs === "number" ? raw.notificationCooldownMs : undefined,
@@ -55,7 +78,8 @@ function configFromPluginApi(api: any): SupervisorConfig {
     watchedPorts: Array.isArray(raw.watchedPorts) ? raw.watchedPorts as number[] : undefined,
     logFiles: Array.isArray(raw.logFiles) ? raw.logFiles as string[] : undefined,
     ignoreDirs: Array.isArray(raw.ignoreDirs) ? raw.ignoreDirs as string[] : undefined,
-    allowedCommands
+    allowedCommands,
+    workerRuntime
   };
 }
 
@@ -68,13 +92,21 @@ export function getProjectSupervisorForTests(): ProjectSupervisorHub | null {
 export function registerProjectSupervisor(api: any): void {
   const config = configFromPluginApi(api);
   const supervisor = new ProjectSupervisorHub(config, api.logger ?? {});
+  const workerRuntime = new ManagedCodexWorkerRuntime(
+    supervisor,
+    supervisor.getConfig().workerRuntime,
+    supervisor.getConfig().projectDir,
+    (message) => api.logger?.warn?.(`project-supervisor worker runtime: ${message}`)
+  );
   let notificationDelivery: NotificationDeliveryWorker | null = null;
+  supervisor.setWorkerRuntimeStatusProvider(() => workerRuntime.getStatus());
   singleton = supervisor;
 
   api.registerService?.({
     id: "project-supervisor-service",
     start: async () => {
       await supervisor.ensureStarted();
+      workerRuntime.start();
       if (config.notificationWebhookUrl) {
         try {
           notificationDelivery = new NotificationDeliveryWorker(
@@ -97,6 +129,7 @@ export function registerProjectSupervisor(api: any): void {
       }
     },
     stop: async () => {
+      workerRuntime.stop();
       notificationDelivery?.stop();
       notificationDelivery = null;
       await supervisor.stop();
@@ -106,6 +139,7 @@ export function registerProjectSupervisor(api: any): void {
   api.lifecycle?.registerRuntimeLifecycle?.({
     id: "project-supervisor-cleanup",
     cleanup: async () => {
+      workerRuntime.stop();
       notificationDelivery?.stop();
       notificationDelivery = null;
       await supervisor.stop();
@@ -239,7 +273,7 @@ export function registerProjectSupervisor(api: any): void {
               : ["- none"]),
             "Recent instruction execution:",
             ...(recentExecution.length > 0
-              ? recentExecution.map((instruction) => `- ${instruction.id} -> ${instruction.targetWorker}: ${instruction.workerStatus ?? "awaiting_ack"}${instruction.workerMessage ? ` (${instruction.workerMessage})` : ""}`)
+              ? recentExecution.map((instruction) => `- ${instruction.id} -> ${instruction.targetWorker}: ${instruction.workerStatus ?? "awaiting_ack"}${instruction.resolutionStatus ? `/${instruction.resolutionStatus}` : ""}${instruction.workerMessage ? ` (${instruction.workerMessage})` : ""}`)
               : ["- none"])
           ].join("\n")
         };
@@ -279,6 +313,17 @@ export function registerProjectSupervisor(api: any): void {
         return { text: `Active project is now ${project.id}:\n${project.projectDir}` };
       }
       if (/^(scan|refresh)$/i.test(args)) return { text: await supervisor.renderTextStatus(true) };
+      const auditMatch = /^audit(?:\s+([a-zA-Z0-9_-]+))?(?:\s+(\d+))?$/i.exec(args);
+      if (auditMatch) {
+        const entries = await supervisor.queryAuditLog({ event: auditMatch[1], limit: auditMatch[2] ? Number(auditMatch[2]) : 10 });
+        return { text: entries.length
+          ? entries.map((entry) => `${entry.at} ${entry.event} ${JSON.stringify(entry.payload)}`).join("\n")
+          : "No matching audit entries." };
+      }
+      if (/^prune-history$/i.test(args)) {
+        const result = await supervisor.maintainHistory("mobile");
+        return { text: `History retention complete: removed ${result.removed}, retained ${result.after}, cutoff ${result.cutoffAt}.` };
+      }
       if (/^(url|panel)$/i.test(args)) return { text: `Project Supervisor panel:\n${supervisor.getPanelUrl()}` };
       const proposeMatch = /^propose(?:\s+([\s\S]+))?$/i.exec(args);
       if (proposeMatch) {
@@ -327,6 +372,21 @@ export function registerProjectSupervisor(api: any): void {
         const instruction = await supervisor.rejectInstruction(rejectMatch[1], rejectMatch[2]);
         return { text: `Rejected ${instruction.id}.` };
       }
+      const resolveMatch = /^resolve\s+([a-f0-9]{8,32})(?:\s+([\s\S]+))?$/i.exec(args);
+      if (resolveMatch) {
+        const instruction = await supervisor.resolveInstruction(resolveMatch[1], { status: "resolved", resolvedBy: "mobile", note: resolveMatch[2] });
+        return { text: `Marked instruction ${instruction.id} resolved.` };
+      }
+      const supersedeMatch = /^supersede\s+([a-f0-9]{8,32})\s+([a-f0-9]{8,32})(?:\s+([\s\S]+))?$/i.exec(args);
+      if (supersedeMatch) {
+        const instruction = await supervisor.resolveInstruction(supersedeMatch[1], { status: "superseded", resolvedBy: "mobile", supersededByInstructionId: supersedeMatch[2], note: supersedeMatch[3] });
+        return { text: `Marked instruction ${instruction.id} superseded by ${instruction.supersededByInstructionId}.` };
+      }
+      const closeMatch = /^close\s+([a-f0-9]{8,32})(?:\s+([\s\S]+))?$/i.exec(args);
+      if (closeMatch) {
+        const instruction = await supervisor.resolveInstruction(closeMatch[1], { status: "closed", resolvedBy: "mobile", note: closeMatch[2] });
+        return { text: `Closed instruction ${instruction.id}.` };
+      }
       const runMatch = /^run\s+([a-zA-Z0-9_-]+)$/i.exec(args);
       if (runMatch) {
         const task = await supervisor.runAllowedCommand(runMatch[1]);
@@ -355,12 +415,17 @@ export function registerProjectSupervisor(api: any): void {
           "/supervise quota exhausted <account-id> <window-id> <reset-at>",
           "/supervise quota available <account-id> <window-id>",
           "/supervise scan",
+          "/supervise audit [event] [limit]",
+          "/supervise prune-history",
           "/supervise propose",
           "/supervise propose <instruction>",
           "/supervise approve latest",
           "/supervise approve <instruction-id>",
           "/supervise reject latest",
           "/supervise reject <instruction-id>",
+          "/supervise resolve <failed-or-ignored-id> [note]",
+          "/supervise supersede <failed-or-ignored-id> <completed-replacement-id> [note]",
+          "/supervise close <failed-or-ignored-id> [note]",
           "/supervise tell <instruction>",
           "/supervise pause",
           "/supervise resume",

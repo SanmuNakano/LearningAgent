@@ -81,7 +81,7 @@ export function buildRisks(params: {
 export function buildWorkerRisks(worker: WorkerState, instructions: SupervisorInstruction[]): string[] {
   const risks: string[] = [];
   const pending = instructions.filter((instruction) => instruction.status === "pending");
-  const failedInstructions = instructions.filter((instruction) => instruction.workerStatus === "failed");
+  const failedInstructions = instructions.filter((instruction) => instruction.workerStatus === "failed" && !instruction.resolutionStatus);
 
   if (worker.source === "missing") risks.push("Worker AI heartbeat is not connected yet.");
   if (worker.source === "invalid") risks.push(`Worker AI heartbeat is invalid${worker.error ? `: ${worker.error}` : "."}`);
@@ -107,8 +107,8 @@ export function buildSupervisionSignals(params: {
   const signals: SupervisionSignal[] = [];
   const nowMs = params.nowMs ?? Date.now();
   const pending = params.instructions.filter((instruction) => instruction.status === "pending");
-  const failedInstructions = params.instructions.filter((instruction) => instruction.workerStatus === "failed");
-  const ignoredInstructions = params.instructions.filter((instruction) => instruction.workerStatus === "ignored");
+  const failedInstructions = params.instructions.filter((instruction) => instruction.workerStatus === "failed" && !instruction.resolutionStatus);
+  const ignoredInstructions = params.instructions.filter((instruction) => instruction.workerStatus === "ignored" && !instruction.resolutionStatus);
   const instructionAckTimeoutMs = params.instructionAckTimeoutMs ?? 15 * 60_000;
   const instructionProgressTimeoutMs = params.instructionProgressTimeoutMs ?? params.staleAfterMs;
   const unacknowledgedInstructions = params.instructions.filter((instruction) => {
@@ -357,7 +357,7 @@ export function updateNotificationsFromSignals(params: {
 export function combineHealth(projectHealth: SupervisorHealth, worker: WorkerState, instructions: SupervisorInstruction[]): SupervisorHealth {
   if (projectHealth === "blocked" || worker.status === "stuck") return "blocked";
   if (worker.source === "invalid") return "blocked";
-  if (instructions.some((instruction) => instruction.workerStatus === "failed")) return "blocked";
+  if (instructions.some((instruction) => instruction.workerStatus === "failed" && !instruction.resolutionStatus)) return "blocked";
   if (projectHealth === "watch") return "watch";
   if (worker.source === "missing" || worker.status === "waiting" || worker.needsUserApproval) return "watch";
   if (instructions.some((instruction) => instruction.status === "pending")) return "watch";
@@ -376,7 +376,7 @@ export function buildNextActions(params: {
   const failed = latestFinishedTasksByName(params.tasks).filter((task) => task.status === "failed" || task.status === "timeout");
   const running = params.tasks.filter((task) => task.status === "running");
   const pending = params.instructions.filter((instruction) => instruction.status === "pending");
-  const failedInstructions = params.instructions.filter((instruction) => instruction.workerStatus === "failed");
+  const failedInstructions = params.instructions.filter((instruction) => instruction.workerStatus === "failed" && !instruction.resolutionStatus);
 
   if (failed.length > 0) {
     actions.push({

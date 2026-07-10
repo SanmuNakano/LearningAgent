@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { NormalizedSupervisorConfig } from "./supervisor-config.js";
 import type {
+  InstructionResolutionStatus,
   InstructionStatus,
   SupervisorInstruction,
   SupervisorNotification,
@@ -266,6 +267,43 @@ export class InstructionService {
     if (instruction.status === "dispatched") throw new Error(`Instruction "${id}" was already dispatched.`);
     instruction.status = "rejected"; instruction.rejectedAt = nowIso(); instruction.rejectReason = reason?.trim() || undefined;
     await this.dependencies.writeState(state); await this.dependencies.audit("instruction_rejected", instruction);
+    return instruction;
+  }
+
+  async resolve(id: string, params: { status: InstructionResolutionStatus; resolvedBy?: string; note?: string; supersededByInstructionId?: string }): Promise<SupervisorInstruction> {
+    const state = await this.dependencies.readState();
+    state.instructions = this.worker.applyEvents(state.instructions.slice(-this.cfg.maxInstructions), await this.worker.readOutbox());
+    const instruction = state.instructions.find((entry) => entry.id === id.trim());
+    if (!instruction) throw new Error(`Instruction "${id}" was not found.`);
+    if (instruction.workerStatus !== "failed" && instruction.workerStatus !== "ignored") {
+      throw new Error(`Instruction "${id}" is not failed or ignored.`);
+    }
+    if (instruction.resolutionStatus) {
+      if (instruction.resolutionStatus === params.status) return instruction;
+      throw new Error(`Instruction "${id}" is already ${instruction.resolutionStatus}.`);
+    }
+    let replacement: SupervisorInstruction | undefined;
+    if (params.status === "superseded") {
+      const replacementId = params.supersededByInstructionId?.trim();
+      if (!replacementId || replacementId === instruction.id) throw new Error("A different replacement instruction id is required.");
+      replacement = state.instructions.find((entry) => entry.id === replacementId);
+      if (!replacement || replacement.projectId !== instruction.projectId) throw new Error(`Replacement instruction "${replacementId}" was not found in this project.`);
+      if (replacement.workerStatus !== "completed") throw new Error(`Replacement instruction "${replacementId}" is not completed.`);
+    }
+    instruction.resolutionStatus = params.status;
+    instruction.resolutionAt = nowIso();
+    instruction.resolutionBy = params.resolvedBy?.trim() || "human";
+    instruction.resolutionNote = params.note?.trim() || undefined;
+    instruction.supersededByInstructionId = replacement?.id;
+    await this.dependencies.writeState(state);
+    await this.dependencies.audit("instruction_resolved", {
+      instructionId: instruction.id,
+      resolutionStatus: instruction.resolutionStatus,
+      resolutionAt: instruction.resolutionAt,
+      resolutionBy: instruction.resolutionBy,
+      resolutionNote: instruction.resolutionNote,
+      supersededByInstructionId: instruction.supersededByInstructionId
+    });
     return instruction;
   }
 

@@ -44,6 +44,7 @@ export type CodexWorkerAdapterOptions = {
   idleHeartbeatIntervalMs?: number;
   codexExecutable?: string;
   runCodex?: (request: CodexRunRequest) => Promise<CodexRunResult>;
+  onPoll?: (at: string) => void;
   onError?: (error: unknown) => void;
 };
 
@@ -81,7 +82,11 @@ function buildPrompt(instruction: WorkerInboxInstruction): string {
 }
 
 function summarizeCodexFailure(result: CodexRunResult): string {
-  const lines = result.output.split(/\r?\n/).map((line) => line.trim()).filter((line) => /error|fail|unauthorized|forbidden|timed?\s*out/i.test(line));
+  const lines = result.output.split(/\r?\n/).map((line) => {
+    const errorIndex = line.indexOf("ERROR");
+    const match = errorIndex >= 0 ? { index: errorIndex } : /(?:\bfailed?\b|\bunauthorized\b|\bforbidden\b|\btimed?\s*out\b)/i.exec(line);
+    return match ? line.slice(match.index).trim() : "";
+  }).filter(Boolean);
   const summary = lines.slice(-3).join(" ")
     .replace(/https?:\/\/\S+/gi, "[url]")
     .replace(/(bearer|api[_ -]?key|access[_ -]?token)\s*[:=]\s*\S+/gi, "$1=[redacted]");
@@ -162,6 +167,7 @@ export class CodexWorkerAdapter {
   async runOnce(): Promise<WorkerInboxInstruction | undefined> {
     if (this.running) return undefined;
     this.running = true;
+    this.options.onPoll?.(new Date().toISOString());
     try {
       const instruction = (await this.source.listWorkerInbox({ workerId: this.workerId }))[0];
       if (!instruction) {
@@ -189,6 +195,7 @@ export class CodexWorkerAdapter {
       try {
         result = await this.runner({ instruction, projectDir: this.options.projectDir, model: this.options.model, profile: this.options.profile, configOverrides: this.options.configOverrides, sandbox: this.sandbox, timeoutMs: this.timeoutMs });
       } catch (error) {
+        this.options.onError?.(error);
         const message = `Codex process could not start (${error instanceof Error ? error.name : "unknown error"}).`;
         await this.acknowledge(instruction, "failed", message);
         await this.source.updateWorkerHeartbeat({ workerId: this.workerId, status: "stuck", currentStep: "Codex process failed to start.", blocker: message, markProgress: true });

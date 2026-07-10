@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { SupervisorCommand, SupervisorConfig } from "./supervisor-types.js";
+import type { SupervisorCommand, SupervisorConfig, WorkerRuntimeConfig } from "./supervisor-types.js";
 
 const DEFAULT_PROJECT_DIR = process.env.OPENCLAW_SUPERVISOR_PROJECT ?? "D:\\learn\\openclaw-plugins";
 const DEFAULT_PORT = 8791;
@@ -11,11 +11,15 @@ const DEFAULT_MAX_FILES = 8_000;
 const DEFAULT_MAX_HISTORY = 100;
 const DEFAULT_MAX_INSTRUCTIONS = 200;
 const DEFAULT_MAX_NOTIFICATIONS = 200;
+const DEFAULT_AUDIT_RETENTION_DAYS = 90;
+const DEFAULT_MAX_AUDIT_ENTRIES = 10_000;
 const DEFAULT_MAX_TASK_LOG_CHARS = 80_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_NOTIFICATION_COOLDOWN_MS = 30 * 60_000;
 const DEFAULT_NOTIFICATION_DELIVERY_INTERVAL_MS = 60_000;
 const DEFAULT_NOTIFICATION_DELIVERY_TIMEOUT_MS = 10_000;
+const DEFAULT_WORKER_POLL_INTERVAL_MS = 5_000;
+const DEFAULT_WORKER_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_COMMANDS: Record<string, string> = {
   build: "npm run build",
   test: "npm test",
@@ -40,6 +44,33 @@ function normalizeAllowedCommands(value: SupervisorConfig["allowedCommands"]): R
     else if (raw && typeof raw.command === "string") out[name] = { title: raw.title || name, command: raw.command, timeoutMs: raw.timeoutMs };
   }
   return out;
+}
+
+export function normalizeWorkerRuntimeConfig(input: WorkerRuntimeConfig = {}): Required<Omit<WorkerRuntimeConfig, "model" | "profile" | "provider">> & Pick<WorkerRuntimeConfig, "model" | "profile" | "provider"> {
+  const workerId = input.workerId?.trim() || "codex-main";
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(workerId)) throw new Error("workerRuntime.workerId must contain only letters, numbers, underscores, or hyphens.");
+  if (input.sandbox && input.sandbox !== "read-only" && input.sandbox !== "workspace-write") throw new Error("workerRuntime.sandbox is invalid.");
+  let provider = input.provider;
+  if (provider) {
+    const id = provider.id?.trim();
+    const baseUrl = provider.baseUrl?.trim();
+    const envKey = provider.envKey?.trim();
+    if (!id || !/^[a-zA-Z0-9_-]{1,64}$/.test(id)) throw new Error("workerRuntime.provider.id is invalid.");
+    if (!baseUrl || !/^https?:\/\/[^\s"']+$/i.test(baseUrl)) throw new Error("workerRuntime.provider.baseUrl must be an HTTP(S) URL.");
+    if (!envKey || !/^[A-Z_][A-Z0-9_]{1,127}$/.test(envKey)) throw new Error("workerRuntime.provider.envKey must name an environment variable, not contain a secret.");
+    if (provider.wireApi && provider.wireApi !== "responses" && provider.wireApi !== "chat") throw new Error("workerRuntime.provider.wireApi is invalid.");
+    provider = { id, baseUrl, envKey, wireApi: provider.wireApi };
+  }
+  return {
+    enabled: input.enabled === true,
+    workerId,
+    model: input.model?.trim() || undefined,
+    profile: input.profile?.trim() || undefined,
+    sandbox: input.sandbox ?? "workspace-write",
+    pollIntervalMs: parsePositiveInt(input.pollIntervalMs, DEFAULT_WORKER_POLL_INTERVAL_MS),
+    timeoutMs: parsePositiveInt(input.timeoutMs, DEFAULT_WORKER_TIMEOUT_MS),
+    provider
+  };
 }
 
 export function normalizeSupervisorConfig(input: SupervisorConfig = {}): Required<Omit<SupervisorConfig, "allowedCommands">> & { allowedCommands: Record<string, SupervisorCommand> } {
@@ -72,6 +103,8 @@ export function normalizeSupervisorConfig(input: SupervisorConfig = {}): Require
     maxHistory: parsePositiveInt(input.maxHistory, DEFAULT_MAX_HISTORY),
     maxInstructions: parsePositiveInt(input.maxInstructions, DEFAULT_MAX_INSTRUCTIONS),
     maxNotifications: parsePositiveInt(input.maxNotifications, DEFAULT_MAX_NOTIFICATIONS),
+    auditRetentionDays: parsePositiveInt(input.auditRetentionDays, DEFAULT_AUDIT_RETENTION_DAYS),
+    maxAuditEntries: parsePositiveInt(input.maxAuditEntries, DEFAULT_MAX_AUDIT_ENTRIES),
     maxTaskLogChars: parsePositiveInt(input.maxTaskLogChars, DEFAULT_MAX_TASK_LOG_CHARS),
     commandTimeoutMs: parsePositiveInt(input.commandTimeoutMs, DEFAULT_COMMAND_TIMEOUT_MS),
     notificationCooldownMs: parsePositiveInt(input.notificationCooldownMs, DEFAULT_NOTIFICATION_COOLDOWN_MS),
@@ -82,7 +115,8 @@ export function normalizeSupervisorConfig(input: SupervisorConfig = {}): Require
     watchedPorts: Array.isArray(input.watchedPorts) ? input.watchedPorts.filter((p) => Number.isInteger(p) && p > 0 && p < 65536) : [],
     logFiles: Array.isArray(input.logFiles) ? input.logFiles.filter((p) => typeof p === "string" && p.trim()).slice(0, 8) : [],
     ignoreDirs: Array.isArray(input.ignoreDirs) ? input.ignoreDirs.filter((p) => typeof p === "string" && p.trim()) : [],
-    allowedCommands: normalizeAllowedCommands(input.allowedCommands)
+    allowedCommands: normalizeAllowedCommands(input.allowedCommands),
+    workerRuntime: normalizeWorkerRuntimeConfig(input.workerRuntime)
   };
 }
 

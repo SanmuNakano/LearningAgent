@@ -150,3 +150,53 @@
 - Verified Phase 18 with `npm run check`; the suite is now 87 passing tests.
 - Live-tested an approved read-only instruction through the local third-party `mirror` provider; heartbeat and acknowledgement flow reached `received`, `started`, and `completed` without modifying project files.
 - Added a Phase 1–18 stage review with current limitations, Phase 19 Managed Worker Runtime tasks, and acceptance criteria.
+
+## 2026-07-10 - Phase 19
+
+- Added a validated, persistent `workerRuntime` plugin configuration for enabled state, worker id, model, profile, sandbox, poll interval, timeout, and non-secret provider metadata.
+- Added a managed Codex Worker runtime tied to the OpenClaw service lifecycle with idempotent start/stop and one execution loop per plugin instance.
+- Kept provider credentials in a named environment variable; only provider id, base URL, environment-variable name, and wire API are passed as Codex metadata.
+- Added runtime visibility to HTTP overview, Dashboard, and `/supervise ai`, including enabled, running, last poll, and sanitized last error.
+- Added disabled-runtime, OpenClaw service lifecycle, lifecycle restart, provider metadata, validation, polling, and provider failure tests.
+- Live-tested a newly approved read-only instruction through explicit `mirror` Provider metadata; the Worker reached `received`, `started`, and `completed` and reported `package.json` without modifying source files.
+- Verified the implementation with `npm run check`; the suite is now 93 passing tests.
+
+## 2026-07-10 - Phase 20
+
+- Changed the Hub background interval and manual refresh to scan every registered project while retaining active-project command routing.
+- Added overlap prevention so a slow all-project scan cannot start a second concurrent scan pass.
+- Added per-project health, scan time, open-alert count, critical-alert count, and isolated scan-error summaries to the HTTP overview, Dashboard, and `/supervise projects`.
+- Aggregated notifications and delivery outboxes across all registered projects; single-alert and acknowledge-all operations now route to the owning project even when it is inactive.
+- Isolated missing or broken project directories so they report a blocked scan without preventing healthy projects from updating.
+- Removed a redundant quota reconcile/write during overview generation after Windows testing exposed a read/rename race.
+- Verified Phase 20 with `npm run check`; the suite is now 95 passing tests.
+
+## 2026-07-10 - Phase 21
+
+- Added audited Supervisor dispositions for failed or ignored instructions: `resolved`, `superseded`, and manual `closed`.
+- Preserved the original Worker execution result while storing resolution time, actor, note, and optional completed replacement instruction id.
+- Required superseding replacements to exist in the same project and have a `completed` Worker result.
+- Removed disposed failures from active risks, health blocking, repeated-failure signals, and next actions so their notifications resolve on the next scan.
+- Added HTTP, Dashboard, and `/supervise resolve|supersede|close` controls plus resolution details in instruction views.
+- Live-tested `superseded` by linking the initial Phase 19 authentication-failure smoke instruction to its successful read-only retry; the failure signal disappeared and project health moved from `blocked` to `watch`.
+- Verified Phase 21 with `npm run check`; the suite is now 97 passing tests.
+
+## 2026-07-10 - Phase 22
+
+- Added configurable audit retention by age and entry count, with serialized append/prune operations and atomic rewrites.
+- Added newest-first audit queries filtered by exact event name, inclusive time range, and bounded result limit.
+- Added authenticated `GET /api/audit`, `POST /api/maintenance/history`, `/supervise audit`, and `/supervise prune-history` controls.
+- Added automatic per-project audit maintenance at most once per day while preserving the existing count-bounded JSON state policy.
+- Kept SQLite optional behind the existing storage interface because the current single-writer workload does not yet justify a database dependency or migration risk.
+- Verified Phase 22 with `npm run check`; the suite is now 101 passing tests.
+
+## 2026-07-10 - Release 0.5.0 Candidate
+
+- Synchronized `package.json`, `package-lock.json`, and `openclaw.plugin.json` at version 0.5.0.
+- Added release notes covering Phase 9–22 and a dedicated migration/rollback guide from 0.4.0.
+- Added `npm run release:check` to run the full suite, verify version/document/package metadata, reject whitespace errors, and inspect the package with `npm pack --dry-run`.
+- Split production TypeScript output from Vitest sources so the release archive excludes compiled test artifacts.
+- Replaced obsolete simple-tool `plugins build/validate` scripts with lifecycle-plugin `plugins inspect/doctor` checks; OpenClaw loaded version 0.5.0 and reported no plugin issues.
+- Kept the package private so the release workflow produces an inspectable plugin archive without enabling accidental npm publication.
+- Deferred commit, tag, push, and deployment until explicit operator approval.
+- Verified the release candidate with 101 passing tests and a 25-file, 72.1 kB dry-run package containing no compiled test artifacts.

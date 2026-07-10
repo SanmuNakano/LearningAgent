@@ -7,6 +7,60 @@ export type WorkerStateSource = "file" | "missing" | "invalid";
 export type InstructionStatus = "pending" | "approved" | "rejected" | "dispatched";
 export type WorkerInstructionStatus = "received" | "started" | "completed" | "failed" | "ignored";
 export type WorkerControlMode = "active" | "pause_requested" | "paused" | "resume_requested";
+export type InstructionResolutionStatus = "resolved" | "superseded" | "closed";
+
+export type AuditLogEntry = {
+  event: string;
+  at: string;
+  payload?: unknown;
+};
+
+export type AuditLogQuery = {
+  event?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+};
+
+export type AuditRetentionResult = {
+  file: string;
+  before: number;
+  after: number;
+  removed: number;
+  cutoffAt: string;
+};
+
+export type CodexProviderMetadata = {
+  id: string;
+  baseUrl: string;
+  envKey: string;
+  wireApi?: "responses" | "chat";
+};
+
+export type WorkerRuntimeConfig = {
+  enabled?: boolean;
+  workerId?: string;
+  model?: string;
+  profile?: string;
+  sandbox?: "read-only" | "workspace-write";
+  pollIntervalMs?: number;
+  timeoutMs?: number;
+  provider?: CodexProviderMetadata;
+};
+
+export type WorkerRuntimeStatus = {
+  enabled: boolean;
+  running: boolean;
+  workerId: string;
+  model?: string;
+  profile?: string;
+  providerId?: string;
+  sandbox: "read-only" | "workspace-write";
+  startedAt?: string;
+  stoppedAt?: string;
+  lastPollAt?: string;
+  lastError?: string;
+};
 
 export type SupervisorCommand = {
   title: string;
@@ -45,10 +99,13 @@ export type SupervisorConfig = {
   notificationDeliveryIntervalMs?: number;
   notificationDeliveryTimeoutMs?: number;
   maxNotifications?: number;
+  auditRetentionDays?: number;
+  maxAuditEntries?: number;
   watchedPorts?: number[];
   logFiles?: string[];
   ignoreDirs?: string[];
   allowedCommands?: Record<string, string | SupervisorCommand>;
+  workerRuntime?: WorkerRuntimeConfig;
 };
 
 export type FileScanSummary = {
@@ -152,6 +209,11 @@ export type SupervisorInstruction = {
   workerStatus?: WorkerInstructionStatus;
   workerMessage?: string;
   workerUpdatedAt?: string;
+  resolutionStatus?: InstructionResolutionStatus;
+  resolutionAt?: string;
+  resolutionBy?: string;
+  resolutionNote?: string;
+  supersededByInstructionId?: string;
 };
 
 export type WorkerControlState = {
@@ -275,10 +337,23 @@ export type SupervisorState = {
   control?: WorkerControlState;
 };
 
+export type ProjectSupervisionSummary = {
+  projectId: string;
+  name?: string;
+  projectDir: string;
+  health: SupervisorHealth;
+  scannedAt: string;
+  summary: string;
+  openAlerts: number;
+  criticalAlerts: number;
+  scanError?: string;
+};
+
 export type SupervisorOverview = {
   activeProject: ProjectRegistryEntry;
   snapshot: SupervisorSnapshot;
   registry: ProjectRegistry;
+  projectSummaries: ProjectSupervisionSummary[];
   commands: string[];
   pendingInstructions: SupervisorInstruction[];
   recentInstructions: SupervisorInstruction[];
@@ -286,6 +361,7 @@ export type SupervisorOverview = {
   signals: SupervisionSignal[];
   notifications: SupervisorNotification[];
   control: WorkerControlState;
+  workerRuntime?: WorkerRuntimeStatus;
   accounts: CodexAccount[];
   quotaWindows: QuotaWindow[];
   quotaLogSources: QuotaLogSource[];

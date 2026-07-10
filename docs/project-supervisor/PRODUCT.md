@@ -154,7 +154,8 @@ Initial command ideas:
 The core is project-agnostic:
 
 - Loads registered projects.
-- Scans project state.
+- Scans every registered project in the background while keeping commands routed to the active project.
+- Aggregates per-project health and alerts for mobile, HTTP, and dashboard views.
 - Reads worker AI state.
 - Maintains task and command history.
 - Produces health, risks, and next actions.
@@ -282,4 +283,5 @@ Required:
 - The first executable Worker adapter is an opt-in local Codex CLI adapter built on the file protocol. Implemented in Phase 18; OpenClaw runtime/thread adapters remain future options.
 - Should mobile approval be required for all instructions or only risky ones?
 - Pause/resume uses a persisted four-state control handshake and requires worker completion acknowledgement before changing the effective state. Implemented in Phase 17.
-- How much project history should be retained?
+- History retention is configurable: state collections use count caps, while audit JSONL uses a 90-day and 10,000-entry default policy. Implemented in Phase 22.
+- SQLite remains an optional future storage backend behind `SupervisorStateStorage`; adopt it only when concurrent writers or larger indexed queries justify the migration.

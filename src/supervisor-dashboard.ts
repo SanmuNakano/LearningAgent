@@ -49,6 +49,7 @@ export function renderDashboardHtml(routePrefix: string): string {
       <div class="panel"><div class="metric">Tasks</div><div id="tasks" class="value">-</div></div>
     </section>
     <section class="panel"><h2>Summary</h2><pre id="summary"></pre></section>
+    <section class="panel"><h2>Registered Projects</h2><table id="projectSummaries"></table></section>
     <section class="panel"><h2>Change & Failure Review</h2><pre id="reviewSummary"></pre></section>
     <section class="panel"><h2>Risks</h2><pre id="risks"></pre></section>
     <section class="panel"><h2>Signals</h2><pre id="signals"></pre></section>
@@ -130,15 +131,22 @@ export function renderDashboardHtml(routePrefix: string): string {
         + "</tr>").join("") + "</tbody>";
     }
     function instructionExecutionRows(items) {
-      if (!items.length) return "<tbody><tr><td colspan='6'>None</td></tr></tbody>";
-      return "<thead><tr><th>ID</th><th>Worker</th><th>Dispatch</th><th>Execution</th><th>Updated</th><th>Message</th></tr></thead><tbody>" + items.map(item => "<tr>"
+      if (!items.length) return "<tbody><tr><td colspan='8'>None</td></tr></tbody>";
+      return "<thead><tr><th>ID</th><th>Worker</th><th>Dispatch</th><th>Execution</th><th>Resolution</th><th>Updated</th><th>Message</th><th>Action</th></tr></thead><tbody>" + items.map(item => "<tr>"
         + "<td>" + esc(item.id) + "</td><td>" + esc(item.targetWorker) + "</td><td>" + esc(item.status) + "</td>"
-        + "<td>" + esc(item.workerStatus || "awaiting_ack") + "</td><td>" + esc(item.workerUpdatedAt || item.dispatchedAt || "-") + "</td>"
-        + "<td>" + esc(item.workerMessage || "-") + "</td></tr>").join("") + "</tbody>";
+        + "<td>" + esc(item.workerStatus || "awaiting_ack") + "</td><td>" + esc(item.resolutionStatus || "open") + "</td><td>" + esc(item.resolutionAt || item.workerUpdatedAt || item.dispatchedAt || "-") + "</td>"
+        + "<td>" + esc(item.resolutionNote || item.workerMessage || "-") + "</td><td>" + instructionResolutionActions(item) + "</td></tr>").join("") + "</tbody>";
+    }
+    function instructionResolutionActions(item) {
+      if (item.resolutionStatus || (item.workerStatus !== "failed" && item.workerStatus !== "ignored")) return "-";
+      return "<button onclick=\"resolveInstruction('" + esc(item.id) + "','resolved')\">Resolve</button> "
+        + "<button onclick=\"supersedeInstruction('" + esc(item.id) + "')\">Supersede</button> "
+        + "<button onclick=\"resolveInstruction('" + esc(item.id) + "','closed')\">Close</button>";
     }
     function notificationRows(items) {
-      if (!items.length) return "<tbody><tr><td colspan='6'>None</td></tr></tbody>";
-      return "<tbody>" + items.map(item => "<tr>"
+      if (!items.length) return "<tbody><tr><td colspan='7'>None</td></tr></tbody>";
+      return "<thead><tr><th>Project</th><th>Severity</th><th>Delivery</th><th>Title</th><th>Detail</th><th>Updated</th><th>Action</th></tr></thead><tbody>" + items.map(item => "<tr>"
+        + "<td>" + esc(item.projectId) + "</td>"
         + "<td>" + esc(item.severity) + "</td>"
         + "<td>" + esc(item.deliveryStatus || "pending") + "</td>"
         + "<td>" + esc(item.title) + "</td>"
@@ -146,6 +154,12 @@ export function renderDashboardHtml(routePrefix: string): string {
         + "<td>" + esc(item.updatedAt) + "</td>"
         + "<td><button onclick=\"ackNotification('" + esc(item.id) + "')\">Ack</button></td>"
         + "</tr>").join("") + "</tbody>";
+    }
+    function projectSummaryRows(items) {
+      if (!items.length) return "<tbody><tr><td colspan='6'>No registered projects</td></tr></tbody>";
+      return "<thead><tr><th>Project</th><th>Health</th><th>Open</th><th>Critical</th><th>Scanned</th><th>Summary</th></tr></thead><tbody>" + items.map(item => "<tr>"
+        + "<td>" + esc(item.projectId) + "</td><td>" + esc(item.health) + "</td><td>" + esc(item.openAlerts) + "</td>"
+        + "<td>" + esc(item.criticalAlerts) + "</td><td>" + esc(item.scannedAt) + "</td><td>" + esc(item.scanError || item.summary) + "</td></tr>").join("") + "</tbody>";
     }
     function accountRows(accounts) {
       if (!accounts.length) return "<tbody><tr><td colspan='5'>No Codex accounts</td></tr></tbody>";
@@ -197,6 +211,7 @@ export function renderDashboardHtml(routePrefix: string): string {
       document.getElementById("recent").textContent = s.fileScan.recent.length;
       document.getElementById("tasks").textContent = s.tasks.length;
       document.getElementById("summary").textContent = s.summary + "\\nGit: " + (s.git.available ? s.git.status || "clean" : s.git.error);
+      document.getElementById("projectSummaries").innerHTML = projectSummaryRows(data.projectSummaries || []);
       const review = s.review || { readiness: "review_required", summary: "Review data unavailable in this snapshot.", recommendation: "Refresh the project scan.", failedTasks: [], logFindings: [] };
       document.getElementById("reviewSummary").textContent = [
         "Decision: " + review.readiness,
@@ -220,7 +235,11 @@ export function renderDashboardHtml(routePrefix: string): string {
         "Step: " + (s.worker.currentStep || "(not reported)"),
         "Needs approval: " + (s.worker.needsUserApproval ? "yes" : "no"),
         "Blocker: " + (s.worker.blocker || "(none)"),
-        "Control: " + (data.control ? data.control.mode : "active")
+        "Control: " + (data.control ? data.control.mode : "active"),
+        "Runtime enabled: " + (data.workerRuntime && data.workerRuntime.enabled ? "yes" : "no"),
+        "Runtime running: " + (data.workerRuntime && data.workerRuntime.running ? "yes" : "no"),
+        "Runtime last poll: " + (data.workerRuntime && data.workerRuntime.lastPollAt || "(not started)"),
+        "Runtime last error: " + (data.workerRuntime && data.workerRuntime.lastError || "(none)")
       ].join("\\n");
       const controlMode = data.control ? data.control.mode : "active";
       document.getElementById("pauseButton").disabled = controlMode !== "active";
@@ -259,6 +278,18 @@ export function renderDashboardHtml(routePrefix: string): string {
     async function rejectInstruction(id) {
       const reason = prompt("Reason") || "";
       await api("/api/reject", { method: "POST", body: JSON.stringify({ id, reason }) });
+      await refresh(true);
+    }
+    async function resolveInstruction(id, status) {
+      const note = prompt("Resolution note") || "";
+      await api("/api/resolve-instruction", { method: "POST", body: JSON.stringify({ id, status, note, resolvedBy: "dashboard" }) });
+      await refresh(true);
+    }
+    async function supersedeInstruction(id) {
+      const replacementId = prompt("Completed replacement instruction id") || "";
+      if (!replacementId) return;
+      const note = prompt("Resolution note") || "";
+      await api("/api/resolve-instruction", { method: "POST", body: JSON.stringify({ id, status: "superseded", supersededByInstructionId: replacementId, note, resolvedBy: "dashboard" }) });
       await refresh(true);
     }
     async function ackNotification(id) {

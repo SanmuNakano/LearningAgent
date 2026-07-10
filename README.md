@@ -4,7 +4,7 @@ OpenClaw plugin that routes QQBot messages to learning specialist agents and exp
 
 Product direction for the cross-project AI supervisor is tracked in [`docs/project-supervisor/PRODUCT.md`](docs/project-supervisor/PRODUCT.md). The file-based worker protocol is documented in [`docs/project-supervisor/FILE_PROTOCOL.md`](docs/project-supervisor/FILE_PROTOCOL.md).
 The module boundaries and dependency rules are documented in [`docs/project-supervisor/ARCHITECTURE.md`](docs/project-supervisor/ARCHITECTURE.md).
-The Phase 1–18 checkpoint, current limitations, and Phase 19 plan are documented in [`docs/project-supervisor/STAGE_REVIEW_2026-07-10.md`](docs/project-supervisor/STAGE_REVIEW_2026-07-10.md).
+Release 0.5.0 changes are listed in [`CHANGELOG.md`](CHANGELOG.md), with upgrade and rollback steps in [`docs/project-supervisor/MIGRATION_0.5.0.md`](docs/project-supervisor/MIGRATION_0.5.0.md). The Phase 1–22 checkpoint is documented in [`docs/project-supervisor/STAGE_REVIEW_2026-07-10.md`](docs/project-supervisor/STAGE_REVIEW_2026-07-10.md).
 
 ## Project Supervisor
 
@@ -61,12 +61,17 @@ OpenClaw commands:
 /supervise quota exhausted personal-a weekly 2026-07-13T10:30:00+08:00
 /supervise quota available personal-a weekly
 /supervise scan
+/supervise audit [event] [limit]
+/supervise prune-history
 /supervise propose
 /supervise propose <instruction>
 /supervise approve latest
 /supervise approve <instruction-id>
 /supervise reject latest
 /supervise reject <instruction-id>
+/supervise resolve <failed-or-ignored-id> [note]
+/supervise supersede <failed-or-ignored-id> <completed-replacement-id> [note]
+/supervise close <failed-or-ignored-id> [note]
 /supervise tell <instruction>
 /supervise pause
 /supervise resume
@@ -75,6 +80,12 @@ OpenClaw commands:
 /supervise run test
 ```
 
+The hub scans every registered project on the background interval, even when another project is active. `/supervise projects`, `/supervise alerts`, the HTTP overview, and the dashboard aggregate per-project health and open alerts. Commands, approvals, Worker control, and direct instructions still target only the active project. One missing or invalid project directory is reported as a blocked scan without stopping scans for other projects.
+
+Failed or ignored Worker results remain in history, but an operator can mark them `resolved`, link them to a completed replacement as `superseded`, or manually `closed`. These dispositions are audited and remove the old instruction from active health risks and alerts without rewriting the original Worker result.
+
+Audit history is queryable from mobile with `/supervise audit [event] [limit]` and over HTTP with `GET /api/audit?event=...&from=...&to=...&limit=...`. Valid entries are retained for 90 days and capped at 10,000 by default. Retention runs automatically at most once per day per project and can be triggered with `/supervise prune-history` or `POST /api/maintenance/history`.
+
 Pause and resume use an acknowledged control handshake. A pause request enters `pause_requested`; normal worker instructions are blocked until the worker reports the pause instruction `completed`. Resume follows the same pattern through `resume_requested`. Failed or ignored resume requests leave the worker safely paused.
 
 Standalone local dashboard:
@@ -82,6 +93,16 @@ Standalone local dashboard:
 ```bash
 npm run supervisor:serve
 ```
+
+Release candidate validation:
+
+```powershell
+npm.cmd run release:check
+```
+
+This runs the full build and test suite, verifies synchronized package/plugin versions and required release documents, checks Git whitespace errors, and performs an `npm pack --dry-run` without publishing.
+
+For a path-installed lifecycle plugin, use `npm.cmd run plugin:inspect` and `npm.cmd run plugin:doctor`. OpenClaw's `plugins build` and `plugins validate` commands target simple tool plugins that expose `defineToolPlugin` metadata and do not apply to this plugin shape.
 
 Then open the printed URL from the same machine. For phone access, expose the host via OpenClaw Gateway, Tailscale, LAN binding, or a trusted tunnel.
 
@@ -101,6 +122,8 @@ node ./dist/supervisor.js --quota-observe personal-a --text-file D:\logs\codex-l
 
 `supervisor:worker:codex` is an opt-in real Worker adapter for an already authenticated local Codex CLI. Without `--once` it polls continuously; with `--once` it processes at most one instruction. It executes only supervisor-approved inbox instructions, uses `workspace-write`, never bypasses sandbox controls, and reports `received`, `started`, `completed`, or `failed` events automatically. Interrupted `started` instructions are not replayed after restart because duplicate edits are less safe than requesting human review.
 
+The plugin can also own this adapter lifecycle through `projectSupervisor.workerRuntime`. When enabled, OpenClaw starts one polling loop with the supervisor service and stops it during service cleanup. Repeated lifecycle calls are idempotent, and `/supervise ai`, the HTTP overview, and the dashboard report whether the runtime is enabled/running plus its last poll and sanitized last error.
+
 Optional flags include `--codex-model <model>`, `--codex-profile <profile>`, repeatable `--codex-config <key=value>`, `--codex-sandbox <read-only|workspace-write>`, `--poll-ms <milliseconds>`, `--timeout-ms <milliseconds>`, and `--codex-bin <path>`. The adapter inherits Codex user configuration and can explicitly inject custom model-provider fields when the standalone CLI does not load Codex App provider tables. Use a dedicated profile to isolate Worker provider/auth settings. Never place a real API key directly in `--codex-config` because command-line arguments may be visible to other local processes; reference an environment variable or use a credential-managing local proxy. Starting the adapter may consume provider quota and modify files in the selected project.
 
 Codex account records contain metadata only. Passwords, session cookies, API keys, and refresh tokens are not stored. Quota windows may be rolling, daily, weekly, monthly, credits, or custom, and every observation is labeled with its source and confidence. The client adapter can parse supported English/Chinese limit messages, absolute reset timestamps, and relative durations; raw messages are discarded after a SHA-256 evidence hash is recorded.
@@ -118,10 +141,27 @@ Example plugin config:
     "staleAfterMs": 14400000,
     "instructionAckTimeoutMs": 900000,
     "instructionProgressTimeoutMs": 7200000,
+    "auditRetentionDays": 90,
+    "maxAuditEntries": 10000,
     "notificationWebhookUrl": "https://alerts.example.com/project-supervisor",
     "notificationWebhookBearerToken": "replace-with-a-secret",
     "notificationDeliveryIntervalMs": 60000,
     "notificationDeliveryTimeoutMs": 10000,
+    "workerRuntime": {
+      "enabled": true,
+      "workerId": "codex-main",
+      "model": "worker-model",
+      "profile": "worker-mirror",
+      "sandbox": "workspace-write",
+      "pollIntervalMs": 5000,
+      "timeoutMs": 1800000,
+      "provider": {
+        "id": "mirror",
+        "baseUrl": "https://api.example.com/v1",
+        "envKey": "MIRROR_API_KEY",
+        "wireApi": "responses"
+      }
+    },
     "watchedPorts": [3000, 5173],
     "logFiles": ["logs/app.log"],
     "allowedCommands": {
@@ -134,6 +174,8 @@ Example plugin config:
 ```
 
 When `notificationWebhookUrl` is configured, the OpenClaw service automatically sends open notification-outbox items as a versioned JSON payload. Delivery failures are retained for retry with exponential backoff. The bearer token is sent only in the `Authorization` header and is never included in the payload or delivery error text.
+
+`workerRuntime.provider` stores provider metadata only. `envKey` must be the name of an environment variable available to OpenClaw; a literal API key is rejected and never written to supervisor state, audit records, logs, or Codex process arguments.
 
 ## Routing Strategy (v0.3.0)
 

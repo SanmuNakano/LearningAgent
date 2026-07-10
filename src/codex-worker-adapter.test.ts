@@ -102,7 +102,7 @@ describe("Codex worker adapter", () => {
       runCodex: async () => ({
         exitCode: 1,
         finalMessage: "private instruction text",
-        output: "user private instruction text\nERROR: 401 Unauthorized at https://secret.example.test/path?token=hidden",
+        output: "user private instruction textERROR: 401 Unauthorized at https://secret.example.test/path?token=hidden",
         timedOut: false
       })
     });

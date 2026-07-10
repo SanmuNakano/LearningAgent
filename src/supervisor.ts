@@ -24,6 +24,7 @@ import {
 } from "./supervisor-http.js";
 import { handleSupervisorHttp } from "./supervisor-controller.js";
 import { InstructionService, NotificationService, WorkerService } from "./supervisor-services.js";
+import { AuditLogService } from "./supervisor-audit.js";
 import { JsonSupervisorStateStorage, type SupervisorStateStorage } from "./supervisor-storage.js";
 export { JsonSupervisorStateStorage, emptySupervisorState, normalizeSupervisorState } from "./supervisor-storage.js";
 export type { SupervisorStateStorage } from "./supervisor-storage.js";
@@ -47,12 +48,17 @@ type Logger = {
 };
 
 import type {
+  AuditLogEntry,
+  AuditLogQuery,
+  AuditRetentionResult,
   FileScanSummary,
   GitSummary,
+  InstructionResolutionStatus,
   InstructionStatus,
   PortSummary,
   ProjectRegistry,
   ProjectRegistryEntry,
+  ProjectSupervisionSummary,
   SupervisionSignal,
   SupervisorCommand,
   SupervisorConfig,
@@ -73,17 +79,24 @@ import type {
   WorkerInstructionEvent,
   WorkerInstructionStatus,
   WorkerPlanItem,
+  WorkerRuntimeConfig,
+  WorkerRuntimeStatus,
   WorkerState,
   WorkerStateSource,
   WorkerStatus
 } from "./supervisor-types.js";
 export type {
+  AuditLogEntry,
+  AuditLogQuery,
+  AuditRetentionResult,
   FileScanSummary,
   GitSummary,
+  InstructionResolutionStatus,
   InstructionStatus,
   PortSummary,
   ProjectRegistry,
   ProjectRegistryEntry,
+  ProjectSupervisionSummary,
   SupervisionSignal,
   SupervisorCommand,
   SupervisorConfig,
@@ -104,6 +117,8 @@ export type {
   WorkerInstructionEvent,
   WorkerInstructionStatus,
   WorkerPlanItem,
+  WorkerRuntimeConfig,
+  WorkerRuntimeStatus,
   WorkerState,
   WorkerStateSource,
   WorkerStatus
@@ -247,6 +262,8 @@ function configForRegistryEntry(
     maxHistory: base.maxHistory,
     maxInstructions: base.maxInstructions,
     maxNotifications: base.maxNotifications,
+    auditRetentionDays: base.auditRetentionDays,
+    maxAuditEntries: base.maxAuditEntries,
     maxTaskLogChars: base.maxTaskLogChars,
     commandTimeoutMs: base.commandTimeoutMs,
     notificationCooldownMs: base.notificationCooldownMs,
@@ -272,13 +289,16 @@ export class ProjectSupervisor {
   private readonly workerService: WorkerService;
   private readonly instructionService: InstructionService;
   private readonly notificationService: NotificationService;
+  private readonly auditService: AuditLogService;
   private readonly stateStorage: SupervisorStateStorage;
+  private lastAuditPruneAt = 0;
 
   constructor(config: SupervisorConfig = {}, logger: Logger = {}, stateStorage?: SupervisorStateStorage) {
     this.cfg = normalizeSupervisorConfig(config);
     this.logger = logger;
     this.token = this.cfg.token;
     this.stateStorage = stateStorage ?? new JsonSupervisorStateStorage(this.cfg.stateFile);
+    this.auditService = new AuditLogService(this.cfg.auditFile, this.cfg.auditRetentionDays, this.cfg.maxAuditEntries);
     const dependencies = {
       readState: () => this.readState(),
       writeState: (state: SupervisorState) => this.writeState(state),
@@ -294,6 +314,7 @@ export class ProjectSupervisor {
   }
 
   async ensureStarted(): Promise<void> {
+    await this.pruneAuditIfDue();
     await this.ensureToken();
     if (this.cfg.autoStartServer) await this.startServer();
     if (!this.scanTimer) {
@@ -384,6 +405,7 @@ export class ProjectSupervisor {
   }
 
   async scan(): Promise<SupervisorSnapshot> {
+    await this.pruneAuditIfDue();
     if (!await pathExists(this.cfg.projectDir)) {
       throw new Error(`Project directory does not exist: ${this.cfg.projectDir}`);
     }
@@ -484,6 +506,17 @@ export class ProjectSupervisor {
     return await this.instructionService.list(status);
   }
 
+  async queryAuditLog(query: AuditLogQuery = {}): Promise<AuditLogEntry[]> {
+    return await this.auditService.query(query);
+  }
+
+  async maintainHistory(actor = "system"): Promise<AuditRetentionResult> {
+    const result = await this.auditService.prune();
+    this.lastAuditPruneAt = Date.now();
+    await this.auditService.append("history_retention_applied", { ...result, actor });
+    return result;
+  }
+
   async listNotifications(status?: SupervisorNotificationStatus): Promise<SupervisorNotification[]> {
     return await this.notificationService.list(status);
   }
@@ -534,6 +567,16 @@ export class ProjectSupervisor {
       activeProject,
       snapshot,
       registry,
+      projectSummaries: [{
+        projectId: activeProject.id,
+        name: activeProject.name,
+        projectDir: snapshot.projectDir,
+        health: snapshot.health,
+        scannedAt: snapshot.scannedAt,
+        summary: snapshot.summary,
+        openAlerts: notifications.length,
+        criticalAlerts: notifications.filter((notification) => notification.severity === "critical").length
+      }],
       commands: Object.keys(this.cfg.allowedCommands),
       pendingInstructions: instructions.filter((instruction) => instruction.status === "pending"),
       recentInstructions: instructions.slice(-8).reverse(),
@@ -576,6 +619,10 @@ export class ProjectSupervisor {
     return await this.instructionService.reject(id, reason);
   }
 
+  async resolveInstruction(id: string, params: { status: InstructionResolutionStatus; resolvedBy?: string; note?: string; supersededByInstructionId?: string }): Promise<SupervisorInstruction> {
+    return await this.instructionService.resolve(id, params);
+  }
+
   async dispatchInstruction(id: string): Promise<SupervisorInstruction> {
     return await this.instructionService.dispatch(id);
   }
@@ -609,11 +656,13 @@ export class ProjectSupervisor {
   }
 
   private async audit(event: string, payload: unknown): Promise<void> {
-    await appendJsonLine(this.cfg.auditFile, {
-      event,
-      at: nowIso(),
-      payload
-    });
+    await this.auditService.append(event, payload);
+  }
+
+  private async pruneAuditIfDue(): Promise<void> {
+    if (Date.now() - this.lastAuditPruneAt < 24 * 60 * 60_000) return;
+    await this.auditService.prune();
+    this.lastAuditPruneAt = Date.now();
   }
 
   private async executeTask(task: TaskRecord, timeoutMs: number): Promise<void> {
@@ -717,9 +766,10 @@ export class ProjectSupervisor {
     const instructions = (await this.listInstructions(status)).slice(-8).reverse();
     if (instructions.length === 0) return status ? `No ${status} supervisor instructions.` : "No supervisor instructions.";
     return instructions.map((instruction) => [
-      `${instruction.id} [${instruction.status}${instruction.workerStatus ? `/${instruction.workerStatus}` : ""}] -> ${instruction.targetWorker}`,
+      `${instruction.id} [${instruction.status}${instruction.workerStatus ? `/${instruction.workerStatus}` : ""}${instruction.resolutionStatus ? `/${instruction.resolutionStatus}` : ""}] -> ${instruction.targetWorker}`,
       instruction.instruction,
       instruction.workerMessage ? `worker: ${instruction.workerMessage}` : null,
+      instruction.resolutionStatus ? `resolution: ${instruction.resolutionStatus} by ${instruction.resolutionBy ?? "human"}${instruction.supersededByInstructionId ? ` -> ${instruction.supersededByInstructionId}` : ""}${instruction.resolutionNote ? ` (${instruction.resolutionNote})` : ""}` : null,
       `created: ${instruction.createdAt}${instruction.dispatchedAt ? `, dispatched: ${instruction.dispatchedAt}` : ""}`
     ].filter((line) => line !== null).join("\n")).join("\n\n");
   }
@@ -776,7 +826,9 @@ export class ProjectSupervisorHub {
   private readonly supervisors = new Map<string, ProjectSupervisor>();
   private server: ReturnType<typeof createServer> | null = null;
   private scanTimer: NodeJS.Timeout | null = null;
+  private scanAllPromise: Promise<ProjectSupervisionSummary[]> | null = null;
   private token = "";
+  private workerRuntimeStatusProvider: (() => WorkerRuntimeStatus) | null = null;
 
   constructor(config: SupervisorConfig = {}, logger: Logger = {}) {
     this.root = new ProjectSupervisor(config, logger);
@@ -790,6 +842,10 @@ export class ProjectSupervisorHub {
 
   getConfig(): NormalizedSupervisorConfig {
     return this.root.getConfig();
+  }
+
+  setWorkerRuntimeStatusProvider(provider: (() => WorkerRuntimeStatus) | null): void {
+    this.workerRuntimeStatusProvider = provider;
   }
 
   async ensureStarted(): Promise<void> {
@@ -861,19 +917,76 @@ export class ProjectSupervisorHub {
     const entry = await this.getActiveProjectEntry();
     const rootCfg = this.root.getConfig();
     if (!entry) return this.root;
+    return this.getSupervisorForEntry(entry);
+  }
+
+  private getSupervisorForEntry(entry: ProjectRegistryEntry): ProjectSupervisor {
+    const rootCfg = this.root.getConfig();
     if (entry.id === rootCfg.projectId && path.resolve(entry.projectDir) === rootCfg.projectDir) return this.root;
     const existing = this.supervisors.get(entry.id);
     if (existing) return existing;
-    const token = this.token || await this.root.ensureToken();
-    const supervisor = new ProjectSupervisor(configForRegistryEntry(rootCfg, entry, { token }), this.logger);
+    const supervisor = new ProjectSupervisor(configForRegistryEntry(rootCfg, entry, { token: this.token || rootCfg.token }), this.logger);
     this.supervisors.set(entry.id, supervisor);
     return supervisor;
   }
 
   async scan(): Promise<SupervisorSnapshot> {
+    await this.scanAllProjects();
+    return await (await this.getActiveSupervisor()).latest();
+  }
+
+  async scanAllProjects(): Promise<ProjectSupervisionSummary[]> {
+    if (this.scanAllPromise) return await this.scanAllPromise;
+    const operation = this.performScanAllProjects();
+    this.scanAllPromise = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.scanAllPromise === operation) this.scanAllPromise = null;
+    }
+  }
+
+  private async performScanAllProjects(): Promise<ProjectSupervisionSummary[]> {
     await this.scanQuotaLogs();
     await this.quotaService.reconcile();
-    return await (await this.getActiveSupervisor()).scan();
+    let registry = await this.readProjectRegistry();
+    if (registry.projects.length === 0) {
+      await this.root.registerCurrentProject();
+      registry = await this.readProjectRegistry();
+    }
+    const summaries: ProjectSupervisionSummary[] = [];
+    for (const entry of registry.projects) {
+      try {
+        const supervisor = this.getSupervisorForEntry(entry);
+        const snapshot = await supervisor.scan();
+        const notifications = await supervisor.listNotifications("open");
+        summaries.push({
+          projectId: entry.id,
+          name: entry.name,
+          projectDir: entry.projectDir,
+          health: snapshot.health,
+          scannedAt: snapshot.scannedAt,
+          summary: snapshot.summary,
+          openAlerts: notifications.length,
+          criticalAlerts: notifications.filter((notification) => notification.severity === "critical").length
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        summaries.push({
+          projectId: entry.id,
+          name: entry.name,
+          projectDir: entry.projectDir,
+          health: "blocked",
+          scannedAt: nowIso(),
+          summary: `BLOCKED: background scan failed for ${entry.id}.`,
+          openAlerts: 0,
+          criticalAlerts: 0,
+          scanError: message
+        });
+        this.logger.warn?.(`project-supervisor scan failed for ${entry.id}: ${message}`);
+      }
+    }
+    return summaries;
   }
 
   async latest(): Promise<SupervisorSnapshot> {
@@ -892,21 +1005,62 @@ export class ProjectSupervisorHub {
     return await (await this.getActiveSupervisor()).listInstructions(status);
   }
 
+  async queryAuditLog(query: AuditLogQuery = {}): Promise<AuditLogEntry[]> {
+    return await (await this.getActiveSupervisor()).queryAuditLog(query);
+  }
+
+  async maintainHistory(actor = "system"): Promise<AuditRetentionResult> {
+    return await (await this.getActiveSupervisor()).maintainHistory(actor);
+  }
+
   async listNotifications(status?: SupervisorNotificationStatus): Promise<SupervisorNotification[]> {
-    const [projectNotifications, quotaNotifications] = await Promise.all([
-      (await this.getActiveSupervisor()).listNotifications(status),
-      this.quotaService.listNotifications(status)
-    ]);
-    return [...projectNotifications, ...quotaNotifications]
+    const registry = await this.readProjectRegistry();
+    const projectNotifications = await Promise.all(registry.projects.map((entry) => this.getSupervisorForEntry(entry).listNotifications(status)));
+    const quotaNotifications = await this.quotaService.listNotifications(status);
+    return [...projectNotifications.flat(), ...quotaNotifications]
       .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
   }
 
+  async getProjectSummaries(): Promise<ProjectSupervisionSummary[]> {
+    const registry = await this.readProjectRegistry();
+    const summaries: ProjectSupervisionSummary[] = [];
+    for (const entry of registry.projects) {
+      try {
+        const supervisor = this.getSupervisorForEntry(entry);
+        const snapshot = await supervisor.latest();
+        const notifications = await supervisor.listNotifications("open");
+        summaries.push({
+          projectId: entry.id,
+          name: entry.name,
+          projectDir: entry.projectDir,
+          health: snapshot.health,
+          scannedAt: snapshot.scannedAt,
+          summary: snapshot.summary,
+          openAlerts: notifications.length,
+          criticalAlerts: notifications.filter((notification) => notification.severity === "critical").length
+        });
+      } catch (error) {
+        summaries.push({
+          projectId: entry.id,
+          name: entry.name,
+          projectDir: entry.projectDir,
+          health: "blocked",
+          scannedAt: nowIso(),
+          summary: `BLOCKED: background scan failed for ${entry.id}.`,
+          openAlerts: 0,
+          criticalAlerts: 0,
+          scanError: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    return summaries;
+  }
+
   async listNotificationOutbox(): Promise<SupervisorNotification[]> {
-    const [projectNotifications, quotaNotifications] = await Promise.all([
-      (await this.getActiveSupervisor()).listNotificationOutbox(),
-      this.quotaService.listNotificationOutbox()
-    ]);
-    return [...projectNotifications, ...quotaNotifications]
+    const registry = await this.readProjectRegistry();
+    const projectNotifications = await Promise.all(registry.projects.map((entry) => this.getSupervisorForEntry(entry).listNotificationOutbox()));
+    const quotaNotifications = await this.quotaService.listNotificationOutbox();
+    return [...projectNotifications.flat(), ...quotaNotifications]
       .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
       .slice(0, 20);
   }
@@ -918,21 +1072,34 @@ export class ProjectSupervisorHub {
   }): Promise<SupervisorNotification> {
     const quotaNotification = await this.quotaService.markNotificationDelivery(params.id, params.status, params.error);
     if (quotaNotification) return quotaNotification;
-    return await (await this.getActiveSupervisor()).markNotificationDelivery(params);
+    const registry = await this.readProjectRegistry();
+    for (const entry of registry.projects) {
+      const supervisor = this.getSupervisorForEntry(entry);
+      const match = (await supervisor.listNotifications()).find((notification) => notification.id === params.id || notification.signalId === params.id);
+      if (match) return await supervisor.markNotificationDelivery(params);
+    }
+    throw new Error(`Notification "${params.id}" was not found.`);
   }
 
   async acknowledgeNotification(id: string, acknowledgedBy = "human"): Promise<SupervisorNotification> {
     const quotaNotification = await this.quotaService.acknowledgeNotification(id, acknowledgedBy);
     if (quotaNotification) return quotaNotification;
-    return await (await this.getActiveSupervisor()).acknowledgeNotification(id, acknowledgedBy);
+    const registry = await this.readProjectRegistry();
+    for (const entry of registry.projects) {
+      const supervisor = this.getSupervisorForEntry(entry);
+      const match = (await supervisor.listNotifications()).find((notification) => notification.id === id || notification.signalId === id);
+      if (match) return await supervisor.acknowledgeNotification(id, acknowledgedBy);
+    }
+    throw new Error(`Notification "${id}" was not found.`);
   }
 
   async acknowledgeOpenNotifications(acknowledgedBy = "human"): Promise<SupervisorNotification[]> {
+    const registry = await this.readProjectRegistry();
     const [projectNotifications, quotaNotifications] = await Promise.all([
-      (await this.getActiveSupervisor()).acknowledgeOpenNotifications(acknowledgedBy),
+      Promise.all(registry.projects.map((entry) => this.getSupervisorForEntry(entry).acknowledgeOpenNotifications(acknowledgedBy))),
       this.quotaService.acknowledgeOpenNotifications(acknowledgedBy)
     ]);
-    return [...projectNotifications, ...quotaNotifications];
+    return [...projectNotifications.flat(), ...quotaNotifications];
   }
 
   async getQuotaRegistry(): Promise<QuotaRegistry> {
@@ -1067,11 +1234,12 @@ export class ProjectSupervisorHub {
     const active = await this.getActiveSupervisor();
     const snapshot = await active.latest();
     await this.quotaService.reconcile();
-    const [registry, instructions, notifications, quotaRegistry] = await Promise.all([
+    const quotaRegistry = await this.quotaService.read();
+    const [registry, instructions, notifications, projectSummaries] = await Promise.all([
       this.readProjectRegistry(),
       active.listInstructions(),
       this.listNotifications("open"),
-      this.getQuotaRegistry()
+      this.getProjectSummaries()
     ]);
     const activeProject = registry.projects.find((project) => project.id === active.getConfig().projectId)
       ?? projectEntryFromConfig(active.getConfig(), undefined, snapshot.scannedAt);
@@ -1079,6 +1247,7 @@ export class ProjectSupervisorHub {
       activeProject,
       snapshot,
       registry,
+      projectSummaries,
       commands: Object.keys(active.getConfig().allowedCommands),
       pendingInstructions: instructions.filter((instruction) => instruction.status === "pending"),
       recentInstructions: instructions.slice(-8).reverse(),
@@ -1086,6 +1255,7 @@ export class ProjectSupervisorHub {
       signals: snapshot.signals ?? [],
       notifications: notifications.slice(-10).reverse(),
       control: await active.getControlState(),
+      workerRuntime: this.workerRuntimeStatusProvider?.(),
       accounts: quotaRegistry.accounts,
       quotaWindows: quotaRegistry.windows,
       quotaLogSources: quotaRegistry.logSources,
@@ -1126,16 +1296,36 @@ export class ProjectSupervisorHub {
     return await (await this.getActiveSupervisor()).rejectInstruction(id, reason);
   }
 
+  async resolveInstruction(id: string, params: { status: InstructionResolutionStatus; resolvedBy?: string; note?: string; supersededByInstructionId?: string }): Promise<SupervisorInstruction> {
+    return await (await this.getActiveSupervisor()).resolveInstruction(id, params);
+  }
+
   async runAllowedCommand(name: string): Promise<TaskRecord> {
     return await (await this.getActiveSupervisor()).runAllowedCommand(name);
   }
 
   async renderTextStatus(forceScan = false): Promise<string> {
-    return await (await this.getActiveSupervisor()).renderTextStatus(forceScan);
+    if (forceScan) await this.scan();
+    return await (await this.getActiveSupervisor()).renderTextStatus(false);
   }
 
   async renderWorkerText(): Promise<string> {
-    return await (await this.getActiveSupervisor()).renderWorkerText();
+    const workerText = await (await this.getActiveSupervisor()).renderWorkerText();
+    const runtime = this.workerRuntimeStatusProvider?.();
+    if (!runtime) return workerText;
+    return [
+      workerText,
+      "Runtime:",
+      `Enabled: ${runtime.enabled ? "yes" : "no"}`,
+      `Running: ${runtime.running ? "yes" : "no"}`,
+      `Worker id: ${runtime.workerId}`,
+      `Model: ${runtime.model ?? "(default)"}`,
+      `Profile: ${runtime.profile ?? "(default)"}`,
+      `Provider: ${runtime.providerId ?? "(default)"}`,
+      `Sandbox: ${runtime.sandbox}`,
+      `Last poll: ${runtime.lastPollAt ?? "(not started)"}`,
+      `Last error: ${runtime.lastError ?? "(none)"}`
+    ].join("\n");
   }
 
   async renderInstructionsText(status?: InstructionStatus): Promise<string> {
@@ -1143,7 +1333,19 @@ export class ProjectSupervisorHub {
   }
 
   async renderProjectsText(): Promise<string> {
-    return await this.root.renderProjectsText();
+    const registry = await this.readProjectRegistry();
+    const summaries = await this.getProjectSummaries();
+    if (registry.projects.length === 0) return "No projects registered yet. Use /supervise register to add the current project.";
+    return [
+      `Active project: ${registry.activeProjectId ?? "(none)"}`,
+      ...summaries.map((summary) => [
+        `${summary.projectId}${summary.projectId === registry.activeProjectId ? " (active)" : ""}: ${summary.health}`,
+        `  dir: ${summary.projectDir}`,
+        `  alerts: ${summary.openAlerts} open, ${summary.criticalAlerts} critical`,
+        `  scanned: ${summary.scannedAt}`,
+        summary.scanError ? `  error: ${summary.scanError}` : `  summary: ${summary.summary}`
+      ].join("\n"))
+    ].join("\n");
   }
 
   async startServer(): Promise<void> {

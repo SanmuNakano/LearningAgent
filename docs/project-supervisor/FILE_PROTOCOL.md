@@ -89,7 +89,7 @@ Supported instruction event statuses:
 - `failed`
 - `ignored`
 
-The supervisor merges the latest outbox event into instruction status views. If an instruction reports `failed`, project health becomes `blocked` until the failure is reviewed or superseded by a later event.
+The supervisor merges the latest outbox event into instruction status views. If an instruction reports `failed`, project health becomes `blocked` until the failure receives a Supervisor disposition. `resolved` records that the issue was verified as fixed, `superseded` links it to a completed replacement instruction, and `closed` records an explicit manual close. The original Worker result remains unchanged for audit history.
 
 ## Worker Adapter Helpers
 
@@ -173,6 +173,17 @@ Events include:
 
 The audit log is for debugging, review, and future mobile history.
 
+Audit history is bounded independently from state history. `auditRetentionDays` defaults to 90 days and `maxAuditEntries` defaults to 10,000 valid or retained lines. Automatic maintenance runs at most once per day for each project; malformed lines remain available for investigation unless the count cap removes them. Manual maintenance is available through `/supervise prune-history` and `POST /api/maintenance/history`.
+
+Audit queries return newest entries first and accept an exact event name, inclusive `from`/`to` timestamps, and a limit capped at 200:
+
+```text
+GET /api/audit?event=instruction_dispatched&from=2026-07-01&limit=50
+/supervise audit instruction_dispatched 10
+```
+
+JSON state remains bounded by `maxHistory`, `maxInstructions`, and `maxNotifications`. The existing `SupervisorStateStorage` boundary keeps SQLite possible, but the default remains atomic JSON because current workloads do not require concurrent writers or database-only queries.
+
 ## Project Registry
 
 For multi-project supervision, the supervisor keeps a central project registry.
@@ -205,7 +216,7 @@ Example:
 }
 ```
 
-`activeProjectId` is the routing switch. Status, scan, command runs, approvals, and direct instructions are applied to that active project. Each project keeps its own `.project-supervisor/state.json`, inbox, outbox, and audit log.
+`activeProjectId` is the command-routing switch. Command runs, approvals, direct instructions, and Worker control are applied to that active project. Background scans cover every registered project, and health/alert views aggregate their results. Each project keeps its own `.project-supervisor/state.json`, inbox, outbox, and audit log.
 
 ## Mobile Commands
 
@@ -214,10 +225,10 @@ The OpenClaw command surface maps to the protocol:
 - `/supervise status` shows project and worker state.
 - `/supervise ai` shows detailed worker heartbeat.
 - `/supervise review` shows active project, worker state, next actions, and pending instructions.
-- `/supervise alerts` shows open supervisor alerts.
-- `/supervise ack alerts` acknowledges all open supervisor alerts.
+- `/supervise alerts` shows open supervisor alerts across all registered projects.
+- `/supervise ack alerts` acknowledges all open supervisor alerts across all registered projects.
 - `/supervise ack <alert-id-or-signal-id>` acknowledges one supervisor alert.
-- `/supervise projects` lists registered projects.
+- `/supervise projects` lists registered projects with health, scan time, and alert counts.
 - `/supervise register` registers the current project in the central registry.
 - `/supervise register <project-dir>` registers another local project and makes it active.
 - `/supervise activate <project-id>` or `/supervise use <project-id>` switches the active project.
@@ -231,6 +242,9 @@ The OpenClaw command surface maps to the protocol:
 - `/supervise pause` dispatches a typed pause request and blocks normal worker instruction dispatch.
 - `/supervise resume` dispatches a typed resume request after the worker has confirmed it is paused.
 - `/supervise pending` lists recent supervisor instructions.
+- `/supervise resolve <id> [note]` marks a failed or ignored instruction resolved.
+- `/supervise supersede <id> <completed-replacement-id> [note]` links a failed or ignored instruction to its successful replacement.
+- `/supervise close <id> [note]` manually closes a failed or ignored instruction.
 
 ## HTTP API
 
@@ -238,6 +252,7 @@ The dashboard and phone gateway use the same active project routing:
 
 - `GET /api/projects` returns the registry.
 - `GET /api/overview` returns the active project, latest snapshot, pending instructions, recent instructions, next actions, allowed commands, registry, and panel URL.
+- `POST /api/resolve-instruction` accepts `{ "id", "status": "resolved" | "superseded" | "closed", "note"?, "resolvedBy"?, "supersededByInstructionId"? }`.
 - `POST /api/worker-heartbeat` writes the active project's worker heartbeat.
 - `GET /api/notifications?status=open` returns supervisor alerts.
 - `POST /api/ack-notification` with `{ "id": "..." }` acknowledges one alert.

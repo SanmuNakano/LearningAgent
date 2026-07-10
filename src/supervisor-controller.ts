@@ -143,6 +143,24 @@ export async function handleSupervisorHttp(
     json(res, 200, { instructions: await supervisor.listInstructions(parsedStatus) });
     return true;
   }
+  if (req.method === "GET" && parsed.pathname === "/api/audit") {
+    const rawLimit = parsed.searchParams.get("limit");
+    const limit = rawLimit === null ? undefined : Number(rawLimit);
+    if (limit !== undefined && (!Number.isInteger(limit) || limit <= 0)) throw new Error("Audit limit must be a positive integer.");
+    json(res, 200, { entries: await supervisor.queryAuditLog({
+      event: parsed.searchParams.get("event") ?? undefined,
+      from: parsed.searchParams.get("from") ?? undefined,
+      to: parsed.searchParams.get("to") ?? undefined,
+      limit
+    }) });
+    return true;
+  }
+  if (req.method === "POST" && parsed.pathname === "/api/maintenance/history") {
+    const body = await readBodyJson(req);
+    const actor = isRecord(body) ? optionalString(body.actor) ?? "http" : "http";
+    json(res, 200, { result: await supervisor.maintainHistory(actor) });
+    return true;
+  }
   if (req.method === "GET" && parsed.pathname === "/api/notifications") {
     const status = parsed.searchParams.get("status");
     const parsedStatus: SupervisorNotificationStatus | undefined =
@@ -339,6 +357,20 @@ export async function handleSupervisorHttp(
     const body = await readBodyJson(req);
     const reason = isRecord(body) && typeof body.reason === "string" ? body.reason : undefined;
     json(res, 200, { instruction: await supervisor.rejectLatestPendingInstruction(reason) });
+    return true;
+  }
+  if (req.method === "POST" && parsed.pathname === "/api/resolve-instruction") {
+    const body = await readBodyJson(req);
+    if (!isRecord(body)) throw new Error("Instruction resolution body must be an object.");
+    const id = optionalString(body.id) ?? "";
+    const status = body.status === "resolved" || body.status === "superseded" || body.status === "closed" ? body.status : undefined;
+    if (!status) throw new Error("Instruction resolution status must be resolved, superseded, or closed.");
+    json(res, 200, { instruction: await supervisor.resolveInstruction(id, {
+      status,
+      resolvedBy: optionalString(body.resolvedBy) ?? "http",
+      note: optionalString(body.note),
+      supersededByInstructionId: optionalString(body.supersededByInstructionId)
+    }) });
     return true;
   }
 

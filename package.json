@@ -1,14 +1,16 @@
 {
   "name": "openclaw-plugin-qq-study-router",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "private": true,
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node ./scripts/clean.mjs && tsc -p tsconfig.build.json",
     "check": "npm run build && npm test",
-    "plugin:build": "npm run build && openclaw plugins build --entry ./dist/index.js",
-    "plugin:validate": "npm run check",
-    "plugin:validate:tool": "npm run build && openclaw plugins validate --entry ./dist/index.js",
+    "plugin:validate": "npm run release:check",
+    "plugin:inspect": "npm run build && openclaw plugins inspect qq-study-router --json",
+    "plugin:doctor": "npm run build && openclaw plugins doctor",
+    "prepack": "npm run build",
+    "release:check": "npm run check && node ./scripts/release-check.mjs && npm pack --dry-run",
     "test": "vitest run",
     "supervisor:serve": "npm run build && node ./dist/supervisor.js --serve --project D:\\learn\\openclaw-plugins",
     "supervisor:worker:inbox": "npm run build && node ./dist/supervisor.js --worker-inbox --project D:\\learn\\openclaw-plugins",
@@ -19,7 +21,9 @@
   "files": [
     "dist",
     "openclaw.plugin.json",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "docs/project-supervisor/MIGRATION_0.5.0.md"
   ],
   "peerDependencies": {
     "openclaw": ">=2026.5.17"

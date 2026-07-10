@@ -2,7 +2,7 @@
   "id": "qq-study-router",
   "name": "QQ Study Router",
   "description": "Route QQBot messages to learning specialist agents and supervise local project progress from OpenClaw/mobile.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -165,6 +165,16 @@
             "description": "Maximum supervisor notification records to retain",
             "default": 200
           },
+          "auditRetentionDays": {
+            "type": "number",
+            "description": "Maximum age of valid audit log entries before automatic pruning",
+            "default": 90
+          },
+          "maxAuditEntries": {
+            "type": "number",
+            "description": "Maximum audit log entries retained after pruning",
+            "default": 10000
+          },
           "maxTaskLogChars": {
             "type": "number",
             "description": "Maximum captured output characters retained for one command task",
@@ -197,6 +207,58 @@
             "type": "number",
             "description": "Notification webhook request timeout in milliseconds",
             "default": 10000
+          },
+          "workerRuntime": {
+            "type": "object",
+            "description": "Optional managed Codex worker runtime. Credentials must stay in the named environment variable.",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "description": "Start one managed Codex worker loop with the supervisor service",
+                "default": false
+              },
+              "workerId": {
+                "type": "string",
+                "description": "Worker inbox identity",
+                "default": "codex-main"
+              },
+              "model": {
+                "type": "string",
+                "description": "Optional Codex model override"
+              },
+              "profile": {
+                "type": "string",
+                "description": "Optional Codex profile name"
+              },
+              "sandbox": {
+                "type": "string",
+                "enum": ["read-only", "workspace-write"],
+                "default": "workspace-write"
+              },
+              "pollIntervalMs": {
+                "type": "number",
+                "description": "Worker inbox polling interval in milliseconds",
+                "default": 5000
+              },
+              "timeoutMs": {
+                "type": "number",
+                "description": "Maximum time for one Codex execution",
+                "default": 1800000
+              },
+              "provider": {
+                "type": "object",
+                "description": "Non-secret third-party provider metadata",
+                "additionalProperties": false,
+                "properties": {
+                  "id": { "type": "string" },
+                  "baseUrl": { "type": "string" },
+                  "envKey": { "type": "string", "description": "Environment variable name containing the API key; never put the key value here" },
+                  "wireApi": { "type": "string", "enum": ["responses", "chat"], "default": "responses" }
+                },
+                "required": ["id", "baseUrl", "envKey"]
+              }
+            }
           },
           "watchedPorts": {
             "type": "array",
