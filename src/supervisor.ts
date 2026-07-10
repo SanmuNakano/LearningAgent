@@ -238,6 +238,8 @@ function configForRegistryEntry(
     autoStartServer: false,
     scanIntervalMs: base.scanIntervalMs,
     staleAfterMs: base.staleAfterMs,
+    instructionAckTimeoutMs: base.instructionAckTimeoutMs,
+    instructionProgressTimeoutMs: base.instructionProgressTimeoutMs,
     maxFiles: base.maxFiles,
     maxHistory: base.maxHistory,
     maxInstructions: base.maxInstructions,
@@ -395,7 +397,15 @@ export class ProjectSupervisor {
     ]);
     const projectRisk = buildRisks({ git, fileScan, ports, tasks, staleAfterMs: this.cfg.staleAfterMs });
     const workerRisks = buildWorkerRisks(worker, instructions);
-    const signals = buildSupervisionSignals({ git, tasks, worker, instructions, staleAfterMs: this.cfg.staleAfterMs });
+    const signals = buildSupervisionSignals({
+      git,
+      tasks,
+      worker,
+      instructions,
+      staleAfterMs: this.cfg.staleAfterMs,
+      instructionAckTimeoutMs: this.cfg.instructionAckTimeoutMs,
+      instructionProgressTimeoutMs: this.cfg.instructionProgressTimeoutMs
+    });
     const baseHealth = combineHealth(projectRisk.health, worker, instructions);
     const health = signals.some((signal) => signal.severity === "critical")
       ? "blocked"

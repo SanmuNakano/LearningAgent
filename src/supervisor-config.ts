@@ -5,6 +5,8 @@ const DEFAULT_PROJECT_DIR = process.env.OPENCLAW_SUPERVISOR_PROJECT ?? "D:\\lear
 const DEFAULT_PORT = 8791;
 const DEFAULT_SCAN_INTERVAL_MS = 60_000;
 const DEFAULT_STALE_AFTER_MS = 4 * 60 * 60_000;
+const DEFAULT_INSTRUCTION_ACK_TIMEOUT_MS = 15 * 60_000;
+const DEFAULT_INSTRUCTION_PROGRESS_TIMEOUT_MS = 2 * 60 * 60_000;
 const DEFAULT_MAX_FILES = 8_000;
 const DEFAULT_MAX_HISTORY = 100;
 const DEFAULT_MAX_INSTRUCTIONS = 200;
@@ -62,6 +64,8 @@ export function normalizeSupervisorConfig(input: SupervisorConfig = {}): Require
     autoStartServer: input.autoStartServer !== false,
     scanIntervalMs: parsePositiveInt(input.scanIntervalMs, DEFAULT_SCAN_INTERVAL_MS),
     staleAfterMs: parsePositiveInt(input.staleAfterMs, DEFAULT_STALE_AFTER_MS),
+    instructionAckTimeoutMs: parsePositiveInt(input.instructionAckTimeoutMs, DEFAULT_INSTRUCTION_ACK_TIMEOUT_MS),
+    instructionProgressTimeoutMs: parsePositiveInt(input.instructionProgressTimeoutMs, DEFAULT_INSTRUCTION_PROGRESS_TIMEOUT_MS),
     maxFiles: parsePositiveInt(input.maxFiles, DEFAULT_MAX_FILES),
     maxHistory: parsePositiveInt(input.maxHistory, DEFAULT_MAX_HISTORY),
     maxInstructions: parsePositiveInt(input.maxInstructions, DEFAULT_MAX_INSTRUCTIONS),

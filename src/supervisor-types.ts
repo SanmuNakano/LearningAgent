@@ -31,6 +31,8 @@ export type SupervisorConfig = {
   autoStartServer?: boolean;
   scanIntervalMs?: number;
   staleAfterMs?: number;
+  instructionAckTimeoutMs?: number;
+  instructionProgressTimeoutMs?: number;
   maxFiles?: number;
   maxHistory?: number;
   maxInstructions?: number;

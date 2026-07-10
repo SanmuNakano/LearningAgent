@@ -8,6 +8,8 @@ describe("supervisor architecture boundaries", () => {
   it("renders the dashboard with a scoped API prefix and no embedded auth token", () => {
     const html = renderDashboardHtml("/plugins/project-supervisor");
     expect(html).toContain('const apiBase = "/plugins/project-supervisor"');
+    expect(html).toContain("Recent Instruction Execution");
+    expect(html).toContain("awaiting_ack");
     expect(html).not.toContain("project_supervisor_token");
   });
 

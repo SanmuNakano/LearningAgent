@@ -57,12 +57,26 @@ export function buildSupervisionSignals(params: {
   worker: WorkerState;
   instructions: SupervisorInstruction[];
   staleAfterMs: number;
+  instructionAckTimeoutMs?: number;
+  instructionProgressTimeoutMs?: number;
   nowMs?: number;
 }): SupervisionSignal[] {
   const signals: SupervisionSignal[] = [];
   const nowMs = params.nowMs ?? Date.now();
   const pending = params.instructions.filter((instruction) => instruction.status === "pending");
   const failedInstructions = params.instructions.filter((instruction) => instruction.workerStatus === "failed");
+  const ignoredInstructions = params.instructions.filter((instruction) => instruction.workerStatus === "ignored");
+  const instructionAckTimeoutMs = params.instructionAckTimeoutMs ?? 15 * 60_000;
+  const instructionProgressTimeoutMs = params.instructionProgressTimeoutMs ?? params.staleAfterMs;
+  const unacknowledgedInstructions = params.instructions.filter((instruction) => {
+    if (instruction.status !== "dispatched" || instruction.workerStatus || !instruction.dispatchedAt) return false;
+    return nowMs - Date.parse(instruction.dispatchedAt) > instructionAckTimeoutMs;
+  });
+  const stalledInstructions = params.instructions.filter((instruction) => {
+    if (instruction.workerStatus !== "received" && instruction.workerStatus !== "started") return false;
+    const progressAt = instruction.workerUpdatedAt ?? instruction.dispatchedAt;
+    return Boolean(progressAt) && nowMs - Date.parse(progressAt!) > instructionProgressTimeoutMs;
+  });
   const runningTasks = params.tasks.filter((task) => task.status === "running");
   const finishedTasks = params.tasks.filter((task) => task.status !== "running");
   const latestFinished = finishedTasks.at(-1);
@@ -102,6 +116,48 @@ export function buildSupervisionSignals(params: {
         command: "/supervise review"
       });
     }
+  }
+
+  if (unacknowledgedInstructions.length > 0) {
+    const oldest = unacknowledgedInstructions[0];
+    const oldestAge = nowMs - Date.parse(oldest.dispatchedAt!);
+    signals.push({
+      id: "worker-instruction-unacknowledged",
+      severity: oldestAge > instructionProgressTimeoutMs ? "critical" : "watch",
+      title: "Worker has not acknowledged an instruction",
+      detail: `${unacknowledgedInstructions.length} dispatched instruction(s) exceeded the acknowledgement window; oldest is ${oldest.id}.`,
+      command: "/supervise pending"
+    });
+  }
+
+  if (stalledInstructions.length > 0) {
+    signals.push({
+      id: "worker-instruction-stalled",
+      severity: "critical",
+      title: "Worker instruction execution is stalled",
+      detail: `${stalledInstructions.length} acknowledged instruction(s) have not reported progress; oldest is ${stalledInstructions[0].id}.`,
+      command: "/supervise review"
+    });
+  }
+
+  if (failedInstructions.length > 0) {
+    signals.push({
+      id: "worker-instruction-failed",
+      severity: "critical",
+      title: "Worker instruction failed",
+      detail: `${failedInstructions.length} dispatched instruction(s) failed; latest is ${failedInstructions.at(-1)!.id}.`,
+      command: "/supervise pending"
+    });
+  }
+
+  if (ignoredInstructions.length > 0) {
+    signals.push({
+      id: "worker-instruction-ignored",
+      severity: "watch",
+      title: "Worker did not follow an approved instruction",
+      detail: `${ignoredInstructions.length} dispatched instruction(s) were ignored; latest is ${ignoredInstructions.at(-1)!.id}.`,
+      command: "/supervise pending"
+    });
   }
 
   if (failedInstructions.length >= 2) {
@@ -162,7 +218,8 @@ export function buildSupervisionSignals(params: {
     });
   }
 
-  return signals.slice(0, 10);
+  const severityRank = { critical: 0, watch: 1, info: 2 } as const;
+  return signals.sort((a, b) => severityRank[a.severity] - severityRank[b.severity]).slice(0, 10);
 }
 
 export function updateNotificationsFromSignals(params: {
@@ -375,4 +432,3 @@ export function buildNextActions(params: {
 
   return actions.slice(0, 8);
 }
-

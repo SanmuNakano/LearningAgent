@@ -75,6 +75,8 @@ describe("ProjectSupervisor", () => {
     });
 
     expect(cfg.port).toBe(8791);
+    expect(cfg.instructionAckTimeoutMs).toBe(15 * 60_000);
+    expect(cfg.instructionProgressTimeoutMs).toBe(2 * 60 * 60_000);
     expect(Object.keys(cfg.allowedCommands)).toEqual(["smoke"]);
     expect(cfg.allowedCommands.smoke.command).toContain("node -e");
   });

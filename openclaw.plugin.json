@@ -135,6 +135,16 @@
             "description": "Mark project blocked when no file activity is seen after this window",
             "default": 14400000
           },
+          "instructionAckTimeoutMs": {
+            "type": "number",
+            "description": "Time allowed for a worker to acknowledge a dispatched instruction",
+            "default": 900000
+          },
+          "instructionProgressTimeoutMs": {
+            "type": "number",
+            "description": "Time allowed between worker instruction progress events",
+            "default": 7200000
+          },
           "maxFiles": {
             "type": "number",
             "description": "Maximum files to scan per pass",

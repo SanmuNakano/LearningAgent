@@ -37,6 +37,8 @@ function configFromPluginApi(api: any): SupervisorConfig {
     autoStartServer: typeof raw.autoStartServer === "boolean" ? raw.autoStartServer : undefined,
     scanIntervalMs: typeof raw.scanIntervalMs === "number" ? raw.scanIntervalMs : undefined,
     staleAfterMs: typeof raw.staleAfterMs === "number" ? raw.staleAfterMs : undefined,
+    instructionAckTimeoutMs: typeof raw.instructionAckTimeoutMs === "number" ? raw.instructionAckTimeoutMs : undefined,
+    instructionProgressTimeoutMs: typeof raw.instructionProgressTimeoutMs === "number" ? raw.instructionProgressTimeoutMs : undefined,
     maxFiles: typeof raw.maxFiles === "number" ? raw.maxFiles : undefined,
     maxHistory: typeof raw.maxHistory === "number" ? raw.maxHistory : undefined,
     maxInstructions: typeof raw.maxInstructions === "number" ? raw.maxInstructions : undefined,
@@ -170,6 +172,7 @@ export function registerProjectSupervisor(api: any): void {
       if (/^review$/i.test(args)) {
         const overview = await supervisor.getOverview();
         const pending = overview.pendingInstructions.slice(-5).reverse();
+        const recentExecution = overview.recentInstructions.filter((instruction) => instruction.status === "dispatched").slice(0, 5);
         return {
           text: [
             `Active project: ${overview.activeProject.id}`,
@@ -189,6 +192,10 @@ export function registerProjectSupervisor(api: any): void {
             "Pending instructions:",
             ...(pending.length > 0
               ? pending.map((instruction) => `- ${instruction.id} -> ${instruction.targetWorker}: ${instruction.instruction}`)
+              : ["- none"]),
+            "Recent instruction execution:",
+            ...(recentExecution.length > 0
+              ? recentExecution.map((instruction) => `- ${instruction.id} -> ${instruction.targetWorker}: ${instruction.workerStatus ?? "awaiting_ack"}${instruction.workerMessage ? ` (${instruction.workerMessage})` : ""}`)
               : ["- none"])
           ].join("\n")
         };
@@ -322,4 +329,3 @@ export function registerProjectSupervisor(api: any): void {
     }
   });
 }
-

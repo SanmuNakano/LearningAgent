@@ -100,6 +100,7 @@ export function renderDashboardHtml(routePrefix: string): string {
       </div>
     </section>
     <section class="panel"><h2>Pending Instructions</h2><table id="instructions"></table></section>
+    <section class="panel"><h2>Recent Instruction Execution</h2><table id="instructionExecution"></table></section>
     <section class="panel"><h2>Recent Files</h2><table id="files"></table></section>
     <section class="panel"><h2>Tasks</h2><table id="taskTable"></table></section>
   </main>
@@ -125,6 +126,13 @@ export function renderDashboardHtml(routePrefix: string): string {
         + "<td>" + esc(item.createdAt) + "</td>"
         + "<td><button onclick=\"approveInstruction('" + esc(item.id) + "')\">Approve</button> <button onclick=\"rejectInstruction('" + esc(item.id) + "')\">Reject</button></td>"
         + "</tr>").join("") + "</tbody>";
+    }
+    function instructionExecutionRows(items) {
+      if (!items.length) return "<tbody><tr><td colspan='6'>None</td></tr></tbody>";
+      return "<thead><tr><th>ID</th><th>Worker</th><th>Dispatch</th><th>Execution</th><th>Updated</th><th>Message</th></tr></thead><tbody>" + items.map(item => "<tr>"
+        + "<td>" + esc(item.id) + "</td><td>" + esc(item.targetWorker) + "</td><td>" + esc(item.status) + "</td>"
+        + "<td>" + esc(item.workerStatus || "awaiting_ack") + "</td><td>" + esc(item.workerUpdatedAt || item.dispatchedAt || "-") + "</td>"
+        + "<td>" + esc(item.workerMessage || "-") + "</td></tr>").join("") + "</tbody>";
     }
     function notificationRows(items) {
       if (!items.length) return "<tbody><tr><td colspan='6'>None</td></tr></tbody>";
@@ -204,6 +212,7 @@ export function renderDashboardHtml(routePrefix: string): string {
       ].join("\\n");
       document.getElementById("nextActions").textContent = data.nextActions.length ? data.nextActions.map(a => "- [" + a.priority + "] " + a.title + ": " + a.detail + (a.command ? " (" + a.command + ")" : "")).join("\\n") : "- none";
       document.getElementById("instructions").innerHTML = pendingRows((data.pendingInstructions || []).slice(-12).reverse());
+      document.getElementById("instructionExecution").innerHTML = instructionExecutionRows((data.recentInstructions || []).filter(x => x.status === "dispatched").slice(0, 12));
       document.getElementById("files").innerHTML = rows(s.fileScan.recent, [x => x.path, x => x.modifiedAt, x => x.size + " B"]);
       document.getElementById("taskTable").innerHTML = rows(s.tasks.slice(-12).reverse(), [x => x.name, x => x.status, x => x.startedAt, x => (x.log || "").slice(-240)]);
       const select = document.getElementById("command");
@@ -310,4 +319,3 @@ export function renderDashboardHtml(routePrefix: string): string {
 </body>
 </html>`;
 }
-

@@ -26,6 +26,7 @@ What it monitors:
 - whitelist command tasks started from the panel or OpenClaw
 - risk state: `ok`, `watch`, or `blocked`
 - structured supervision signals such as stale worker progress, repeated command failures, pending human decisions, local changes ready for review, and git ahead/behind state
+- approved-instruction compliance tracking for acknowledgement timeout, stalled execution, failure, and explicit ignore events
 
 Safe controls:
 
@@ -104,6 +105,8 @@ Example plugin config:
     "host": "127.0.0.1",
     "port": 8791,
     "staleAfterMs": 14400000,
+    "instructionAckTimeoutMs": 900000,
+    "instructionProgressTimeoutMs": 7200000,
     "watchedPorts": [3000, 5173],
     "logFiles": ["logs/app.log"],
     "allowedCommands": {

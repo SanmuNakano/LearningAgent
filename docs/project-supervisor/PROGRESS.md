@@ -100,3 +100,12 @@
 - Kept worker heartbeat/inbox/outbox files outside the state backend so the cross-process worker protocol remains stable.
 - Added tests for missing/malformed state, concurrent atomic writes, temporary-file cleanup, and an injected in-memory backend.
 - Completed Phase 13 architecture stabilization; `npm run check` now passes 70 tests.
+
+## 2026-07-10 - Phase 14
+
+- Added worker instruction compliance tracking on top of the existing inbox/outbox acknowledgement protocol.
+- Added configurable acknowledgement and progress windows with watch/critical signals for unacknowledged and stalled instructions.
+- Added immediate signals for failed and explicitly ignored approved instructions; repeated failures retain their existing escalation signal.
+- Added recent instruction execution state to the dashboard and mobile `/supervise review` output.
+- Prioritized critical and watch signals before informational signals when snapshot limits are applied.
+- Verified Phase 14 with `npm run check`; the suite is now 73 passing tests.

@@ -240,6 +240,10 @@ Current signal examples:
 
 - `worker-heartbeat-missing`
 - `worker-no-progress`
+- `worker-instruction-unacknowledged`
+- `worker-instruction-stalled`
+- `worker-instruction-failed`
+- `worker-instruction-ignored`
 - `repeated-command-failure`
 - `repeated-worker-instruction-failure`
 - `pending-human-decision`
