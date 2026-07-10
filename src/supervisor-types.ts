@@ -176,6 +176,7 @@ export type WorkerInboxInstruction = {
   projectId: string;
   targetWorker: string;
   instruction: string;
+  kind?: "work" | "pause" | "resume";
   createdAt: string;
   approvedAt?: string;
   dispatchedAt: string;

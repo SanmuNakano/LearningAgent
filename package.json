@@ -13,6 +13,7 @@
     "supervisor:serve": "npm run build && node ./dist/supervisor.js --serve --project D:\\learn\\openclaw-plugins",
     "supervisor:worker:inbox": "npm run build && node ./dist/supervisor.js --worker-inbox --project D:\\learn\\openclaw-plugins",
     "supervisor:worker:heartbeat": "npm run build && node ./dist/supervisor.js --worker-heartbeat working --project D:\\learn\\openclaw-plugins",
+    "supervisor:worker:codex": "npm run build && node ./dist/supervisor.js --worker-codex --project D:\\learn\\openclaw-plugins --worker-id codex-main",
     "supervisor:notification:outbox": "npm run build && node ./dist/supervisor.js --notification-outbox --project D:\\learn\\openclaw-plugins"
   },
   "files": [

@@ -4,6 +4,7 @@ OpenClaw plugin that routes QQBot messages to learning specialist agents and exp
 
 Product direction for the cross-project AI supervisor is tracked in [`docs/project-supervisor/PRODUCT.md`](docs/project-supervisor/PRODUCT.md). The file-based worker protocol is documented in [`docs/project-supervisor/FILE_PROTOCOL.md`](docs/project-supervisor/FILE_PROTOCOL.md).
 The module boundaries and dependency rules are documented in [`docs/project-supervisor/ARCHITECTURE.md`](docs/project-supervisor/ARCHITECTURE.md).
+The Phase 1–18 checkpoint, current limitations, and Phase 19 plan are documented in [`docs/project-supervisor/STAGE_REVIEW_2026-07-10.md`](docs/project-supervisor/STAGE_REVIEW_2026-07-10.md).
 
 ## Project Supervisor
 
@@ -89,6 +90,7 @@ Worker adapter helpers:
 ```bash
 npm run supervisor:worker:heartbeat
 npm run supervisor:worker:inbox
+npm run supervisor:worker:codex -- --once
 npm run supervisor:notification:outbox
 node ./dist/supervisor.js --worker-heartbeat working --project D:\learn\openclaw-plugins --worker-id codex-main --goal "Build supervisor" --step "Running tests" --progress
 node ./dist/supervisor.js --worker-ack <instruction-id> received --project D:\learn\openclaw-plugins --message "Instruction received."
@@ -96,6 +98,10 @@ node ./dist/supervisor.js --worker-ack <instruction-id> completed --project D:\l
 node ./dist/supervisor.js --mark-notification-delivery <notification-id> delivered --project D:\learn\openclaw-plugins
 node ./dist/supervisor.js --quota-observe personal-a --text-file D:\logs\codex-limit.txt --project D:\learn\openclaw-plugins
 ```
+
+`supervisor:worker:codex` is an opt-in real Worker adapter for an already authenticated local Codex CLI. Without `--once` it polls continuously; with `--once` it processes at most one instruction. It executes only supervisor-approved inbox instructions, uses `workspace-write`, never bypasses sandbox controls, and reports `received`, `started`, `completed`, or `failed` events automatically. Interrupted `started` instructions are not replayed after restart because duplicate edits are less safe than requesting human review.
+
+Optional flags include `--codex-model <model>`, `--codex-profile <profile>`, repeatable `--codex-config <key=value>`, `--codex-sandbox <read-only|workspace-write>`, `--poll-ms <milliseconds>`, `--timeout-ms <milliseconds>`, and `--codex-bin <path>`. The adapter inherits Codex user configuration and can explicitly inject custom model-provider fields when the standalone CLI does not load Codex App provider tables. Use a dedicated profile to isolate Worker provider/auth settings. Never place a real API key directly in `--codex-config` because command-line arguments may be visible to other local processes; reference an environment variable or use a credential-managing local proxy. Starting the adapter may consume provider quota and modify files in the selected project.
 
 Codex account records contain metadata only. Passwords, session cookies, API keys, and refresh tokens are not stored. Quota windows may be rolling, daily, weekly, monthly, credits, or custom, and every observation is labeled with its source and confidence. The client adapter can parse supported English/Chinese limit messages, absolute reset timestamps, and relative durations; raw messages are discarded after a SHA-256 evidence hash is recorded.
 

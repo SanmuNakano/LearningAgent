@@ -137,3 +137,16 @@
 - Guarded state transitions by current control mode and instruction ID so late acknowledgements cannot overwrite a newer request.
 - Added `/supervise resume`, `POST /api/pause`, `POST /api/resume`, overview/control status, and dashboard controls.
 - Verified Phase 17 with `npm run check`; the suite is now 82 passing tests.
+
+## 2026-07-10 - Phase 18
+
+- Added an opt-in Codex CLI Worker adapter that consumes approved inbox instructions one at a time.
+- Added automatic heartbeat plus `received`, `started`, `completed`, and `failed` acknowledgement reporting.
+- Added safe pause handling without launching Codex, workspace-write sandboxing, execution timeouts, and sanitized process failures.
+- Prevented automatic replay of interrupted instructions after adapter restart to avoid duplicate edits.
+- Added rate-limited idle heartbeat reporting, Windows global Codex CLI launch resolution, CLI controls, and operator documentation.
+- Added dedicated Codex profile selection so third-party Worker providers can be isolated from Codex App authentication.
+- Added explicit custom-provider config overrides and reduced failed execution records to sanitized error summaries instead of full Codex transcripts.
+- Verified Phase 18 with `npm run check`; the suite is now 87 passing tests.
+- Live-tested an approved read-only instruction through the local third-party `mirror` provider; heartbeat and acknowledgement flow reached `received`, `started`, and `completed` without modifying project files.
+- Added a Phase 1–18 stage review with current limitations, Phase 19 Managed Worker Runtime tasks, and acceptance criteria.

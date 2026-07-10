@@ -168,8 +168,9 @@ export class WorkerService {
       const projectId = optionalString(raw.projectId);
       const targetWorker = optionalString(raw.targetWorker) ?? optionalString(raw.workerId);
       const instruction = optionalString(raw.instruction);
+      const kind = raw.kind === "pause" || raw.kind === "resume" ? raw.kind : "work";
       const dispatchedAt = optionalString(raw.dispatchedAt);
-      return id && projectId && targetWorker && instruction && dispatchedAt ? [{ id, projectId, targetWorker, instruction, createdAt: optionalString(raw.createdAt) ?? dispatchedAt, approvedAt: optionalString(raw.approvedAt), dispatchedAt }] : [];
+      return id && projectId && targetWorker && instruction && dispatchedAt ? [{ id, projectId, targetWorker, instruction, kind, createdAt: optionalString(raw.createdAt) ?? dispatchedAt, approvedAt: optionalString(raw.approvedAt), dispatchedAt }] : [];
     });
     const eventById = new Map<string, WorkerInstructionEvent>();
     for (const event of events) {
@@ -289,7 +290,7 @@ export class InstructionService {
         requestedBy: instruction.createdBy
       };
     }
-    await appendJsonLine(this.cfg.workerInboxFile, { id: instruction.id, projectId: instruction.projectId, targetWorker: instruction.targetWorker, instruction: instruction.instruction, createdAt: instruction.createdAt, approvedAt: instruction.approvedAt, dispatchedAt: instruction.dispatchedAt });
+    await appendJsonLine(this.cfg.workerInboxFile, { id: instruction.id, projectId: instruction.projectId, targetWorker: instruction.targetWorker, instruction: instruction.instruction, kind, createdAt: instruction.createdAt, approvedAt: instruction.approvedAt, dispatchedAt: instruction.dispatchedAt });
     await this.dependencies.writeState(state); await this.dependencies.audit("instruction_dispatched", instruction);
     return instruction;
   }

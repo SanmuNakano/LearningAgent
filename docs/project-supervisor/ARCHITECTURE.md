@@ -34,6 +34,11 @@
 - `src/codex-quota-adapter.ts` converts supported client messages into normalized quota observations.
 - `src/quota-log-watcher.ts` reads explicitly registered files incrementally and passes candidate lines to the quota adapter.
 
+### Worker Execution Adapters
+
+- `src/codex-worker-adapter.ts` consumes approved file-protocol instructions and runs the local Codex CLI with bounded concurrency, workspace sandboxing, timeouts, heartbeat updates, and acknowledgement reporting.
+- Worker execution remains opt-in and depends only on the supervisor public worker protocol, not on OpenClaw internals.
+
 ## Dependency Direction
 
 ```text

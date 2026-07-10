@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { quotaParsers } from "./quota.js";
+import { CodexWorkerAdapter } from "./codex-worker-adapter.js";
 import {
   ProjectSupervisorHub,
   type SupervisorConfig,
@@ -21,6 +22,10 @@ function readBooleanArg(args: string[], name: string, inverseName?: string): boo
   const raw = readArg(args, name);
   if (!raw) return true;
   return /^(1|true|yes|y)$/i.test(raw);
+}
+
+function readArgs(args: string[], name: string): string[] {
+  return args.flatMap((value, index) => value === name && args[index + 1] && !args[index + 1].startsWith("--") ? [args[index + 1]] : []);
 }
 
 function parseWorkerStatus(value: unknown): WorkerStatus | undefined {
@@ -44,6 +49,37 @@ export async function startSupervisorCli(args = process.argv.slice(2)): Promise<
     port: portIndex >= 0 ? Number(args[portIndex + 1]) : undefined,
     host: "0.0.0.0"
   };
+
+  if (args.includes("--worker-codex")) {
+    const supervisor = new ProjectSupervisorHub({ ...baseConfig, autoStartServer: false }, console);
+    const sandboxArg = readArg(args, "--codex-sandbox");
+    const sandbox = sandboxArg === "read-only" ? "read-only" : "workspace-write";
+    const adapter = new CodexWorkerAdapter(supervisor, {
+      projectDir: supervisor.getConfig().projectDir,
+      workerId: workerIdIndex >= 0 ? args[workerIdIndex + 1] : undefined,
+      model: readArg(args, "--codex-model"),
+      profile: readArg(args, "--codex-profile"),
+      configOverrides: readArgs(args, "--codex-config"),
+      sandbox,
+      pollIntervalMs: Number(readArg(args, "--poll-ms")) || undefined,
+      timeoutMs: Number(readArg(args, "--timeout-ms")) || undefined,
+      codexExecutable: readArg(args, "--codex-bin"),
+      onError: (error) => console.error(`Codex worker adapter failed: ${error instanceof Error ? error.message : String(error)}`)
+    });
+    if (args.includes("--once")) {
+      const instruction = await adapter.runOnce();
+      console.log(JSON.stringify({ processedInstructionId: instruction?.id ?? null }, null, 2));
+      return;
+    }
+    adapter.start();
+    console.log(`Codex worker adapter started for ${supervisor.getConfig().projectDir}.`);
+    await new Promise<void>((resolve) => {
+      const stop = () => { adapter.stop(); resolve(); };
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+    });
+    return;
+  }
 
   const heartbeatIndex = args.indexOf("--worker-heartbeat");
   if (heartbeatIndex >= 0) {

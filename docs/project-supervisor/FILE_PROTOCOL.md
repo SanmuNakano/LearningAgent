@@ -66,7 +66,7 @@ The supervisor appends approved instructions to `.project-supervisor/inbox.jsonl
 Each line is one JSON object:
 
 ```json
-{"id":"abc123","projectId":"learning-agent","targetWorker":"codex-main","instruction":"Run tests and summarize failures.","createdAt":"2026-07-09T11:20:00.000Z","approvedAt":"2026-07-09T11:21:00.000Z","dispatchedAt":"2026-07-09T11:21:01.000Z"}
+{"id":"abc123","projectId":"learning-agent","targetWorker":"codex-main","instruction":"Run tests and summarize failures.","kind":"work","createdAt":"2026-07-09T11:20:00.000Z","approvedAt":"2026-07-09T11:21:00.000Z","dispatchedAt":"2026-07-09T11:21:01.000Z"}
 ```
 
 The worker AI may poll this file or let a runtime adapter consume it.
@@ -132,6 +132,33 @@ node ./dist/supervisor.js --worker-inbox --project D:\learn\openclaw-plugins
 node ./dist/supervisor.js --worker-ack <instruction-id> received --project D:\learn\openclaw-plugins --message "Instruction received."
 node ./dist/supervisor.js --worker-ack <instruction-id> completed --project D:\learn\openclaw-plugins --message "Done."
 ```
+
+### Codex CLI Worker Adapter
+
+The opt-in Codex Worker adapter converts approved inbox instructions into non-interactive `codex exec` runs:
+
+```bash
+npm run supervisor:worker:codex -- --once
+npm run supervisor:worker:codex
+node ./dist/supervisor.js --worker-codex --project D:\learn\openclaw-plugins --worker-id codex-main --once
+```
+
+The adapter processes one instruction at a time and uses the local Codex login. Work and resume instructions run with `--sandbox workspace-write` by default. Pause instructions never launch Codex; they complete only after the adapter reaches a point where no Codex process is running.
+
+Safety behavior:
+
+- only dispatched instructions for the configured worker ID are consumed;
+- the adapter writes heartbeat and acknowledgement state automatically;
+- it never passes a sandbox-bypass flag;
+- process errors and timeouts become sanitized failed acknowledgements;
+- an instruction left `received` or `started` after adapter restart is failed instead of replayed automatically;
+- idle heartbeats are rate-limited to avoid audit-log noise.
+
+The adapter is not enabled by default. Enabling it may consume Codex quota and allows approved instructions to modify files inside the selected project.
+
+The adapter inherits the local Codex configuration, including custom `model_provider` definitions. `--codex-profile <profile>` selects a dedicated Codex profile for Worker execution so App/interactive authentication and third-party provider authentication do not need to share one configuration path.
+
+Repeatable `--codex-config <key=value>` arguments support standalone CLI installations that do not load Codex App custom-provider tables. These overrides must contain provider metadata only. Do not put real API keys or access tokens on the command line; use an environment-backed provider field or a local proxy that manages credentials outside the Worker process.
 
 ## Audit Log
 
