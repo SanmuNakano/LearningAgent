@@ -351,6 +351,71 @@ describe("ProjectSupervisor", () => {
     }
   });
 
+  it("tracks notification delivery outbox state", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisorDir = join(projectDir, ".project-supervisor");
+      await mkdir(supervisorDir, { recursive: true });
+      await writeFile(join(supervisorDir, "worker-state.json"), JSON.stringify({
+        workerId: "codex-main",
+        status: "working",
+        currentStep: "Reviewing instructions"
+      }), "utf-8");
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(supervisorDir, "state.json"),
+        autoStartServer: false,
+        maxFiles: 100
+      });
+
+      await supervisor.createInstruction({
+        instruction: "Review this proposed action.",
+        createdBy: "supervisor",
+        source: "system"
+      });
+      await supervisor.scan();
+
+      const pending = await supervisor.listNotificationOutbox();
+      expect(pending).toHaveLength(1);
+      expect(pending[0].deliveryStatus).toBe("pending");
+
+      const failed = await supervisor.markNotificationDelivery({
+        id: pending[0].id,
+        status: "failed",
+        error: "gateway unavailable"
+      });
+      expect(failed.deliveryStatus).toBe("failed");
+      expect(failed.deliveryAttempts).toBe(1);
+      expect(failed.deliveryError).toBe("gateway unavailable");
+      expect(await supervisor.listNotificationOutbox()).toHaveLength(1);
+
+      const delivered = await supervisor.markNotificationDelivery({
+        id: pending[0].signalId,
+        status: "delivered"
+      });
+      expect(delivered.deliveryStatus).toBe("delivered");
+      expect(delivered.deliveryAttempts).toBe(2);
+      expect(await supervisor.listNotificationOutbox()).toHaveLength(0);
+
+      await supervisor.scan();
+      expect(await supervisor.listNotificationOutbox()).toHaveLength(0);
+      expect((await supervisor.listNotifications("open"))[0].deliveryStatus).toBe("delivered");
+
+      await supervisor.createInstruction({
+        instruction: "Review another proposed action.",
+        createdBy: "supervisor",
+        source: "system"
+      });
+      await supervisor.scan();
+      const changed = await supervisor.listNotificationOutbox();
+      expect(changed).toHaveLength(1);
+      expect(changed[0].deliveryStatus).toBe("pending");
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
   it("emits a critical signal for repeated command failures", async () => {
     const projectDir = await makeProject();
     try {
@@ -598,6 +663,83 @@ describe("ProjectSupervisor", () => {
     }
   });
 
+  it("exchanges a dashboard URL token for an HttpOnly cookie and keeps gateway API paths scoped", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(projectDir, ".project-supervisor", "state.json"),
+        autoStartServer: false,
+        maxFiles: 100
+      });
+      const token = await supervisor.ensureToken();
+      const redirect = makeResponse();
+
+      await supervisor.handleHttp({
+        method: "GET",
+        url: `/plugins/project-supervisor?token=${token}`,
+        headers: { host: "localhost" }
+      } as any, redirect as any);
+
+      expect(redirect.statusCode).toBe(303);
+      expect(redirect.headers.Location).toBe("/plugins/project-supervisor");
+      expect(redirect.headers["Set-Cookie"]).toContain("HttpOnly");
+      expect(redirect.headers["Set-Cookie"]).toContain("SameSite=Strict");
+      expect(redirect.headers.Location).not.toContain(token);
+
+      const cookie = redirect.headers["Set-Cookie"].split(";")[0];
+      const dashboard = makeResponse();
+      await supervisor.handleHttp({
+        method: "GET",
+        url: "/plugins/project-supervisor",
+        headers: { host: "localhost", cookie }
+      } as any, dashboard as any);
+
+      expect(dashboard.statusCode).toBe(200);
+      expect(dashboard.body).toContain('const apiBase = "/plugins/project-supervisor"');
+      expect(dashboard.body).not.toContain(token);
+
+      const overview = makeResponse();
+      await supervisor.handleHttp({
+        method: "GET",
+        url: "/plugins/project-supervisor/api/overview",
+        headers: { host: "localhost", cookie }
+      } as any, overview as any);
+      expect(overview.statusCode).toBe(200);
+      expect(overview.body).not.toContain(token);
+      expect(JSON.parse(overview.body).panelUrl).toBe("http://127.0.0.1:8791/");
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
+  it("rejects oversized HTTP request bodies before reading them", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(projectDir, ".project-supervisor", "state.json"),
+        autoStartServer: false,
+        maxFiles: 100
+      });
+      const token = await supervisor.ensureToken();
+      const request = {
+        method: "POST",
+        url: `/api/propose?token=${token}`,
+        headers: { host: "localhost", "content-length": String(1024 * 1024 + 1) },
+        async *[Symbol.asyncIterator]() {
+          yield Buffer.from("{}");
+        }
+      };
+
+      await expect(supervisor.handleHttp(request as any, makeResponse() as any)).rejects.toThrow("too large");
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
   it("registers the current project in a central project registry", async () => {
     const projectDir = await makeProject();
     try {
@@ -672,6 +814,65 @@ describe("ProjectSupervisor", () => {
     } finally {
       await removeProject(projectA);
       await removeProject(projectB);
+    }
+  });
+
+  it("manages Codex accounts and quota reset reminders through the hub HTTP API", async () => {
+    const projectDir = await makeProject();
+    try {
+      const hub = new ProjectSupervisorHub({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(projectDir, ".project-supervisor", "state.json"),
+        projectRegistryFile: join(projectDir, ".central-supervisor", "projects.json"),
+        accountRegistryFile: join(projectDir, ".central-supervisor", "accounts.json"),
+        autoStartServer: false,
+        maxFiles: 100
+      });
+      const token = await hub.getRootSupervisor().ensureToken();
+      const accountResponse = makeResponse();
+      await hub.handleHttp(makeJsonRequest("POST", `/api/accounts/register?token=${token}`, {
+        id: "codex-personal",
+        displayName: "Personal Codex",
+        accountType: "personal",
+        timezone: "Asia/Shanghai"
+      }) as any, accountResponse as any);
+      expect(accountResponse.statusCode).toBe(200);
+
+      const quotaResponse = makeResponse();
+      const limitMessage = "Codex weekly usage limit reached. Resets at 2000-01-01T00:00:00.000Z.";
+      await hub.handleHttp(makeJsonRequest("POST", `/api/quotas/observe?token=${token}`, {
+        accountId: "codex-personal",
+        text: limitMessage
+      }) as any, quotaResponse as any);
+      expect(quotaResponse.statusCode).toBe(200);
+
+      const overview = await hub.getOverview();
+      const quotaRegistry = await hub.getQuotaRegistry();
+      const quotaAlert = (await hub.listNotificationOutbox()).find((notification) => notification.signalId === "codex-quota-reset:codex-personal:weekly");
+      expect(overview.accounts[0].id).toBe("codex-personal");
+      expect(overview.quotaWindows[0].status).toBe("available_unverified");
+      expect(quotaAlert?.projectId).toBe("accounts");
+      expect(quotaRegistry.observations[0].matched).toBe(true);
+      expect(quotaRegistry.observations[0].evidenceHash).toHaveLength(64);
+      expect(JSON.stringify(quotaRegistry)).not.toContain(limitMessage);
+
+      await hub.markNotificationDelivery({ id: quotaAlert!.id, status: "delivered" });
+      expect((await hub.listNotificationOutbox()).some((notification) => notification.id === quotaAlert!.id)).toBe(false);
+
+      const logFile = join(projectDir, "codex-personal.log");
+      await writeFile(logFile, "ordinary line\nDaily usage limit reached. Try again in 2h.\n", "utf-8");
+      await hub.registerQuotaLogSource({ id: "personal-log", accountId: "codex-personal", file: logFile, startAt: "beginning" });
+      const firstScan = await hub.scanQuotaLogs();
+      const afterFirstScan = await hub.getQuotaRegistry();
+      expect(firstScan[0].matched).toBe(1);
+      expect(afterFirstScan.windows.find((window) => window.id === "daily")?.status).toBe("exhausted");
+
+      const observationCount = afterFirstScan.observations.length;
+      expect((await hub.scanQuotaLogs())[0].linesRead).toBe(0);
+      expect((await hub.getQuotaRegistry()).observations).toHaveLength(observationCount);
+    } finally {
+      await removeProject(projectDir);
     }
   });
 });

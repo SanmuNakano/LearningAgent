@@ -3,6 +3,7 @@
 OpenClaw plugin that routes QQBot messages to learning specialist agents and exposes a local Project Supervisor for mobile progress monitoring.
 
 Product direction for the cross-project AI supervisor is tracked in [`docs/project-supervisor/PRODUCT.md`](docs/project-supervisor/PRODUCT.md). The file-based worker protocol is documented in [`docs/project-supervisor/FILE_PROTOCOL.md`](docs/project-supervisor/FILE_PROTOCOL.md).
+The module boundaries and dependency rules are documented in [`docs/project-supervisor/ARCHITECTURE.md`](docs/project-supervisor/ARCHITECTURE.md).
 
 ## Project Supervisor
 
@@ -46,6 +47,15 @@ OpenClaw commands:
 /supervise register
 /supervise register D:\learn\another-project
 /supervise activate openclaw-plugins
+/supervise accounts
+/supervise account add personal-a Personal Codex
+/supervise account remove personal-a
+/supervise quota observe personal-a Usage limit reached. Try again in 5h.
+/supervise quota watch add personal-a personal-log D:\logs\codex-personal.log
+/supervise quota watch remove personal-log
+/supervise quota watch scan
+/supervise quota exhausted personal-a weekly 2026-07-13T10:30:00+08:00
+/supervise quota available personal-a weekly
 /supervise scan
 /supervise propose
 /supervise propose <instruction>
@@ -73,10 +83,17 @@ Worker adapter helpers:
 ```bash
 npm run supervisor:worker:heartbeat
 npm run supervisor:worker:inbox
+npm run supervisor:notification:outbox
 node ./dist/supervisor.js --worker-heartbeat working --project D:\learn\openclaw-plugins --worker-id codex-main --goal "Build supervisor" --step "Running tests" --progress
 node ./dist/supervisor.js --worker-ack <instruction-id> received --project D:\learn\openclaw-plugins --message "Instruction received."
 node ./dist/supervisor.js --worker-ack <instruction-id> completed --project D:\learn\openclaw-plugins --message "Done."
+node ./dist/supervisor.js --mark-notification-delivery <notification-id> delivered --project D:\learn\openclaw-plugins
+node ./dist/supervisor.js --quota-observe personal-a --text-file D:\logs\codex-limit.txt --project D:\learn\openclaw-plugins
 ```
+
+Codex account records contain metadata only. Passwords, session cookies, API keys, and refresh tokens are not stored. Quota windows may be rolling, daily, weekly, monthly, credits, or custom, and every observation is labeled with its source and confidence. The client adapter can parse supported English/Chinese limit messages, absolute reset timestamps, and relative durations; raw messages are discarded after a SHA-256 evidence hash is recorded.
+
+Registered quota log sources are scanned automatically on the supervisor interval. The watcher stores byte offsets and file identity only, handles appended partial lines and log rotation, and never persists raw log content. New sources tail from the current file end by default, so old log history does not trigger stale alerts.
 
 Example plugin config:
 

@@ -93,6 +93,10 @@
             "type": "string",
             "description": "Optional central JSON file used to register supervised projects"
           },
+          "accountRegistryFile": {
+            "type": "string",
+            "description": "Optional central JSON file for Codex account metadata, quota windows, and reset notifications"
+          },
           "defaultWorkerId": {
             "type": "string",
             "description": "Default worker AI id when the heartbeat does not report one",
@@ -136,10 +140,35 @@
             "description": "Maximum files to scan per pass",
             "default": 8000
           },
+          "maxHistory": {
+            "type": "number",
+            "description": "Maximum project snapshots and command records to retain",
+            "default": 100
+          },
           "maxInstructions": {
             "type": "number",
             "description": "Maximum supervisor instruction records to retain",
             "default": 200
+          },
+          "maxNotifications": {
+            "type": "number",
+            "description": "Maximum supervisor notification records to retain",
+            "default": 200
+          },
+          "maxTaskLogChars": {
+            "type": "number",
+            "description": "Maximum captured output characters retained for one command task",
+            "default": 80000
+          },
+          "commandTimeoutMs": {
+            "type": "number",
+            "description": "Default timeout for allowed commands in milliseconds",
+            "default": 300000
+          },
+          "notificationCooldownMs": {
+            "type": "number",
+            "description": "Delay before an acknowledged or resolved signal may reopen a notification",
+            "default": 1800000
           },
           "watchedPorts": {
             "type": "array",

@@ -261,3 +261,113 @@ Notification statuses:
 - `resolved`: the underlying signal disappeared before acknowledgement.
 
 Notifications are deduplicated by `projectId + signalId`. After acknowledgement, the same signal will not reopen until the configured cooldown expires. Default cooldown is 30 minutes.
+
+### Notification Delivery Outbox
+
+An external OpenClaw/QQ adapter can poll open notifications that have not been delivered:
+
+- `GET /api/notification-outbox` returns pending and previously failed deliveries.
+- `POST /api/mark-notification-delivery` with `{ "id": "...", "status": "delivered" }` marks a successful delivery.
+- `POST /api/mark-notification-delivery` with `{ "id": "...", "status": "failed", "error": "..." }` records a retry-visible failure.
+- `--notification-outbox` exposes the same queue to a local adapter.
+- `--mark-notification-delivery <id-or-signal-id> <delivered|failed>` records the adapter result.
+
+A delivered notification remains delivered across periodic scans. It is queued again only when the signal changes materially or an acknowledged/resolved notification is reopened after cooldown.
+
+## Dashboard Authentication
+
+The generated dashboard URL contains a bootstrap query token for compatibility with phone links. Opening the dashboard exchanges that token for an `HttpOnly`, `SameSite=Strict` session cookie and redirects to a clean URL. API clients may alternatively send `Authorization: Bearer <token>`.
+
+Request bodies are limited to 1 MiB. Startup logs redact query tokens; external gateways and tunnels should also be configured to avoid logging sensitive query strings.
+
+## Codex Account And Quota Registry
+
+Codex account metadata and quota windows are stored centrally, separate from project runtime state:
+
+```text
+<supervisor-home>/accounts.json
+```
+
+Account records contain display metadata only. They must not contain passwords, browser cookies, API keys, refresh tokens, or other login credentials.
+
+Supported quota window types:
+
+- `rolling`
+- `daily`
+- `weekly`
+- `monthly`
+- `credits`
+- `custom`
+
+Supported quota statuses:
+
+- `available`
+- `low`
+- `exhausted`
+- `available_unverified`
+- `unknown`
+
+Every observation records a source (`manual`, `client_signal`, `official_api`, or `estimated`) and confidence (`exact`, `observed`, or `estimated`). When an exhausted window reaches its recorded `resetAt`, it becomes `available_unverified` and emits one deduplicated notification through the standard notification outbox.
+
+HTTP API:
+
+- `GET /api/accounts`
+- `POST /api/accounts/register`
+- `POST /api/accounts/remove`
+- `POST /api/quotas/set`
+- `POST /api/quotas/observe` with `{ "accountId": "...", "text": "..." }`
+
+Mobile commands:
+
+- `/supervise accounts`
+- `/supervise account add <id> [display-name]`
+- `/supervise account remove <id>`
+- `/supervise quota observe <account-id> <limit-message>`
+- `/supervise quota exhausted <account-id> <window-id> <reset-at>`
+- `/supervise quota available <account-id> <window-id>`
+
+Quota recovery is intentionally marked unverified until the user or a future official/client adapter confirms that the account can be used again.
+
+### Codex Client Signal Adapter
+
+The versioned client adapter accepts explicit Codex CLI/App limit messages through HTTP, OpenClaw commands, or the standalone CLI:
+
+```bash
+node ./dist/supervisor.js --quota-observe personal-a --text "Usage limit reached. Try again in 5h."
+node ./dist/supervisor.js --quota-observe personal-a --text-file D:\logs\codex-limit.txt
+```
+
+It recognizes supported English and Chinese exhaustion/recovery phrases, absolute reset timestamps, Unix reset fields, and relative day/hour/minute/second durations. Unrecognized or ambiguous messages are recorded but never applied to quota state.
+
+Raw signal text is not persisted. The registry keeps only normalized status/window/reset fields, parser version, match reason, observation time, and a SHA-256 evidence hash. This provides audit correlation without retaining potentially sensitive CLI or account text.
+
+### Automatic Quota Log Watcher
+
+Each log source binds one explicitly configured local file to one registered Codex account. Sources are stored in `accounts.json`; raw file contents are never copied into supervisor state.
+
+New sources default to `startAt: "end"` so historical log entries do not create stale recovery alerts. The registration API may explicitly use `startAt: "beginning"` when a controlled backfill is required.
+
+Mobile commands:
+
+- `/supervise quota watch add <account-id> <source-id> <absolute-log-file>`
+- `/supervise quota watch remove <source-id>`
+- `/supervise quota watch scan`
+
+HTTP API:
+
+- `POST /api/quota-log-sources/register`
+- `POST /api/quota-log-sources/remove`
+- `POST /api/quota-log-sources/scan`
+
+The watcher runs during every supervisor scan. It:
+
+- reads only bytes appended after the persisted cursor;
+- waits for a newline before processing an incomplete tail;
+- detects file replacement using file identity and detects truncation by size;
+- limits each read to 256 KiB;
+- skips the oldest excess backlog when more than 256 KiB accumulated and reports `skippedBytes`;
+- filters ordinary log lines before invoking the quota parser;
+- advances the cursor only after candidate lines have been processed;
+- persists offsets, file identity, size, timestamps, and sanitized errors, but never raw log lines.
+
+Log paths must be explicitly registered by an authenticated supervisor user. Environment variables in paths are not expanded; use an absolute path.

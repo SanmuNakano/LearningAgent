@@ -2,10 +2,38 @@ import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { promises as fs } from "node:fs";
-import { existsSync } from "node:fs";
-import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  CodexQuotaService,
+  type CodexAccount,
+  type QuotaRegistry,
+  type QuotaLogCursor,
+  type QuotaLogSource,
+  type QuotaWindow,
+  type RegisterQuotaLogSourceInput,
+  type RegisterAccountInput,
+  type SetQuotaInput
+} from "./quota.js";
+import { parseCodexQuotaSignal, type CodexQuotaObservation } from "./codex-quota-adapter.js";
+import { isQuotaSignalCandidate, pollQuotaLogSource } from "./quota-log-watcher.js";
+import {
+  redactUrlToken,
+  stripUrlToken,
+  writeHttpError
+} from "./supervisor-http.js";
+import { handleSupervisorHttp } from "./supervisor-controller.js";
+import { normalizeSupervisorConfig, type NormalizedSupervisorConfig } from "./supervisor-config.js";
+export { normalizeSupervisorConfig } from "./supervisor-config.js";
+import { checkPort, readLogTails, readPackageScripts, scanFiles, scanGit } from "./project-scanner.js";
+import {
+  buildNextActions,
+  buildRisks,
+  buildSupervisionSignals,
+  buildWorkerRisks,
+  combineHealth,
+  updateNotificationsFromSignals
+} from "./supervision-evaluator.js";
 
 type Logger = {
   info?: (message: string) => void;
@@ -13,287 +41,70 @@ type Logger = {
   error?: (message: string) => void;
 };
 
-export type SupervisorHealth = "ok" | "watch" | "blocked";
-export type TaskStatus = "running" | "ok" | "failed" | "timeout";
-export type WorkerStatus = "unknown" | "working" | "waiting" | "idle" | "stuck" | "done";
-export type WorkerStateSource = "file" | "missing" | "invalid";
-export type InstructionStatus = "pending" | "approved" | "rejected" | "dispatched";
-export type WorkerInstructionStatus = "received" | "started" | "completed" | "failed" | "ignored";
-
-export type SupervisorCommand = {
-  title: string;
-  command: string;
-  timeoutMs?: number;
-};
-
-export type SupervisorConfig = {
-  projectId?: string;
-  projectDir?: string;
-  stateFile?: string;
-  workerStateFile?: string;
-  workerInboxFile?: string;
-  workerOutboxFile?: string;
-  auditFile?: string;
-  projectRegistryFile?: string;
-  defaultWorkerId?: string;
-  host?: string;
-  port?: number;
-  publicUrl?: string;
-  token?: string;
-  autoStartServer?: boolean;
-  scanIntervalMs?: number;
-  staleAfterMs?: number;
-  maxFiles?: number;
-  maxHistory?: number;
-  maxInstructions?: number;
-  maxTaskLogChars?: number;
-  commandTimeoutMs?: number;
-  notificationCooldownMs?: number;
-  maxNotifications?: number;
-  watchedPorts?: number[];
-  logFiles?: string[];
-  ignoreDirs?: string[];
-  allowedCommands?: Record<string, string | SupervisorCommand>;
-};
-
-export type FileScanSummary = {
-  totalFiles: number;
-  skipped: number;
-  newest: Array<{ path: string; modifiedAt: string; size: number }>;
-  recent: Array<{ path: string; modifiedAt: string; size: number }>;
-  byExtension: Record<string, number>;
-};
-
-export type GitSummary = {
-  available: boolean;
-  branch?: string;
-  upstream?: string;
-  status?: string;
-  changedFiles?: number;
-  aheadBy?: number;
-  behindBy?: number;
-  lastCommit?: string;
-  error?: string;
-};
-
-export type PortSummary = {
-  port: number;
-  open: boolean;
-};
-
-export type TaskRecord = {
-  id: string;
-  name: string;
-  command: string;
-  startedAt: string;
-  finishedAt?: string;
-  status: TaskStatus;
-  exitCode?: number | null;
-  durationMs?: number;
-  log: string;
-};
-
-export type WorkerPlanItem = {
-  step: string;
-  status: "pending" | "in_progress" | "completed" | "blocked";
-};
-
-export type WorkerState = {
-  projectId: string;
-  workerId: string;
-  status: WorkerStatus;
-  source: WorkerStateSource;
-  goal?: string;
-  currentStep?: string;
-  plan: WorkerPlanItem[];
-  lastProgressAt?: string;
-  lastActivityAt?: string;
-  needsUserApproval: boolean;
-  blocker?: string | null;
-  updatedAt: string;
-  error?: string;
-};
-
-export type WorkerHeartbeatUpdate = {
-  workerId?: string;
-  status?: WorkerStatus;
-  goal?: string;
-  currentStep?: string;
-  plan?: unknown;
-  lastProgressAt?: string;
-  lastActivityAt?: string;
-  needsUserApproval?: boolean;
-  blocker?: string | null;
-  markProgress?: boolean;
-};
-
-export type SupervisorInstruction = {
-  id: string;
-  projectId: string;
-  targetWorker: string;
-  createdBy: "human" | "supervisor";
-  status: InstructionStatus;
-  instruction: string;
-  source: "mobile" | "http" | "system";
-  createdAt: string;
-  approvedAt?: string;
-  rejectedAt?: string;
-  dispatchedAt?: string;
-  rejectReason?: string;
-  workerStatus?: WorkerInstructionStatus;
-  workerMessage?: string;
-  workerUpdatedAt?: string;
-};
-
-export type WorkerInstructionEvent = {
-  instructionId: string;
-  projectId?: string;
-  workerId?: string;
-  status: WorkerInstructionStatus;
-  message?: string;
-  at: string;
-};
-
-export type WorkerInboxInstruction = {
-  id: string;
-  projectId: string;
-  targetWorker: string;
-  instruction: string;
-  createdAt: string;
-  approvedAt?: string;
-  dispatchedAt: string;
-  workerStatus?: WorkerInstructionStatus;
-  workerMessage?: string;
-  workerUpdatedAt?: string;
-};
-
-export type ProjectRegistryEntry = {
-  id: string;
-  name?: string;
-  projectDir: string;
-  stateFile?: string;
-  workerStateFile?: string;
-  workerInboxFile?: string;
-  workerOutboxFile?: string;
-  auditFile?: string;
-  addedAt: string;
-  lastSeenAt?: string;
-};
-
-export type ProjectRegistry = {
-  activeProjectId?: string;
-  projects: ProjectRegistryEntry[];
-};
-
-export type SupervisorNextAction = {
-  id: string;
-  priority: "low" | "medium" | "high";
-  title: string;
-  detail: string;
-  command?: string;
-};
-
-export type SupervisionSignal = {
-  id: string;
-  severity: "info" | "watch" | "critical";
-  title: string;
-  detail: string;
-  command?: string;
-};
-
-export type SupervisorNotificationStatus = "open" | "acknowledged" | "resolved";
-
-export type SupervisorNotification = {
-  id: string;
-  projectId: string;
-  signalId: string;
-  severity: "watch" | "critical";
-  title: string;
-  detail: string;
-  command?: string;
-  status: SupervisorNotificationStatus;
-  createdAt: string;
-  updatedAt: string;
-  lastSeenAt: string;
-  occurrenceCount: number;
-  sourceSnapshotId?: string;
-  acknowledgedAt?: string;
-  acknowledgedBy?: string;
-  resolvedAt?: string;
-};
-
-export type SupervisorSnapshot = {
-  id: string;
-  projectDir: string;
-  scannedAt: string;
-  health: SupervisorHealth;
-  summary: string;
-  risks: string[];
-  fileScan: FileScanSummary;
-  git: GitSummary;
-  packageScripts: string[];
-  ports: PortSummary[];
-  logTails: Array<{ path: string; text: string; error?: string }>;
-  tasks: TaskRecord[];
-  worker: WorkerState;
-  instructions: SupervisorInstruction[];
-  nextActions: SupervisorNextAction[];
-  signals: SupervisionSignal[];
-  projects: ProjectRegistry;
-};
-
-export type SupervisorOverview = {
-  activeProject: ProjectRegistryEntry;
-  snapshot: SupervisorSnapshot;
-  registry: ProjectRegistry;
-  commands: string[];
-  pendingInstructions: SupervisorInstruction[];
-  recentInstructions: SupervisorInstruction[];
-  nextActions: SupervisorNextAction[];
-  signals: SupervisionSignal[];
-  notifications: SupervisorNotification[];
-  panelUrl: string;
-};
-
+import type {
+  FileScanSummary,
+  GitSummary,
+  InstructionStatus,
+  PortSummary,
+  ProjectRegistry,
+  ProjectRegistryEntry,
+  SupervisionSignal,
+  SupervisorCommand,
+  SupervisorConfig,
+  SupervisorHealth,
+  SupervisorInstruction,
+  SupervisorNextAction,
+  SupervisorNotification,
+  SupervisorNotificationDeliveryStatus,
+  SupervisorNotificationStatus,
+  SupervisorOverview,
+  SupervisorSnapshot,
+  TaskRecord,
+  TaskStatus,
+  WorkerHeartbeatUpdate,
+  WorkerInboxInstruction,
+  WorkerInstructionEvent,
+  WorkerInstructionStatus,
+  WorkerPlanItem,
+  WorkerState,
+  WorkerStateSource,
+  WorkerStatus
+} from "./supervisor-types.js";
+export type {
+  FileScanSummary,
+  GitSummary,
+  InstructionStatus,
+  PortSummary,
+  ProjectRegistry,
+  ProjectRegistryEntry,
+  SupervisionSignal,
+  SupervisorCommand,
+  SupervisorConfig,
+  SupervisorHealth,
+  SupervisorInstruction,
+  SupervisorNextAction,
+  SupervisorNotification,
+  SupervisorNotificationDeliveryStatus,
+  SupervisorNotificationStatus,
+  SupervisorOverview,
+  SupervisorSnapshot,
+  TaskRecord,
+  TaskStatus,
+  WorkerHeartbeatUpdate,
+  WorkerInboxInstruction,
+  WorkerInstructionEvent,
+  WorkerInstructionStatus,
+  WorkerPlanItem,
+  WorkerState,
+  WorkerStateSource,
+  WorkerStatus
+} from "./supervisor-types.js";
 type SupervisorState = {
   token?: string;
   snapshots: SupervisorSnapshot[];
   tasks: TaskRecord[];
   instructions: SupervisorInstruction[];
   notifications: SupervisorNotification[];
-};
-
-const DEFAULT_PROJECT_DIR = process.env.OPENCLAW_SUPERVISOR_PROJECT ?? "D:\\learn\\openclaw-plugins";
-const DEFAULT_PORT = 8791;
-const DEFAULT_SCAN_INTERVAL_MS = 60_000;
-const DEFAULT_STALE_AFTER_MS = 4 * 60 * 60_000;
-const DEFAULT_MAX_FILES = 8_000;
-const DEFAULT_MAX_HISTORY = 100;
-const DEFAULT_MAX_INSTRUCTIONS = 200;
-const DEFAULT_MAX_NOTIFICATIONS = 200;
-const DEFAULT_MAX_TASK_LOG_CHARS = 80_000;
-const DEFAULT_COMMAND_TIMEOUT_MS = 5 * 60_000;
-const DEFAULT_NOTIFICATION_COOLDOWN_MS = 30 * 60_000;
-
-const DEFAULT_IGNORES = new Set([
-  ".git",
-  ".hg",
-  ".svn",
-  "node_modules",
-  "dist",
-  "build",
-  ".next",
-  ".nuxt",
-  ".venv",
-  "venv",
-  "__pycache__",
-  ".project-supervisor"
-]);
-
-const DEFAULT_COMMANDS: Record<string, string> = {
-  build: "npm run build",
-  test: "npm test",
-  check: "npm run check"
 };
 
 function nowIso(): string {
@@ -311,15 +122,6 @@ function clip(text: string, maxChars: number): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function parsePositiveInt(value: unknown, fallback: number): number {
-  if (typeof value === "number" && Number.isFinite(value) && value > 0) return Math.floor(value);
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed);
-  }
-  return fallback;
 }
 
 function shellFor(command: string): { file: string; args: string[] } {
@@ -373,40 +175,6 @@ async function pathExists(target: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-async function runCapture(command: string, cwd: string, timeoutMs = 8_000): Promise<{ ok: boolean; stdout: string; stderr: string; code: number | null; error?: string }> {
-  return await new Promise((resolve) => {
-    const shell = shellFor(command);
-    const child = spawn(shell.file, shell.args, { cwd, windowsHide: true });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const timer = setTimeout(() => {
-      settled = true;
-      child.kill();
-      resolve({ ok: false, stdout, stderr, code: null, error: "timeout" });
-    }, timeoutMs);
-
-    child.stdout.on("data", (chunk) => {
-      stdout = clip(stdout + String(chunk), 16_000);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr = clip(stderr + String(chunk), 16_000);
-    });
-    child.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ ok: false, stdout, stderr, code: null, error: error.message });
-    });
-    child.on("close", (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ ok: code === 0, stdout, stderr, code });
-    });
-  });
 }
 
 function parseWorkerStatus(value: unknown): WorkerStatus {
@@ -650,542 +418,6 @@ function normalizeState(raw: unknown): SupervisorState {
   };
 }
 
-async function scanFiles(projectDir: string, cfg: Required<Pick<SupervisorConfig, "maxFiles">> & { ignoreDirs: string[] }): Promise<FileScanSummary> {
-  const byExtension: Record<string, number> = {};
-  const newest: Array<{ path: string; modifiedAt: string; size: number; mtime: number }> = [];
-  const recent: Array<{ path: string; modifiedAt: string; size: number; mtime: number }> = [];
-  const stack = [projectDir];
-  const ignores = new Set([...DEFAULT_IGNORES, ...cfg.ignoreDirs]);
-  const recentCutoff = Date.now() - 60 * 60_000;
-  let totalFiles = 0;
-  let skipped = 0;
-
-  while (stack.length > 0 && totalFiles < cfg.maxFiles) {
-    const current = stack.pop();
-    if (!current) continue;
-    let entries: import("node:fs").Dirent[];
-    try {
-      entries = await fs.readdir(current, { withFileTypes: true });
-    } catch {
-      skipped++;
-      continue;
-    }
-
-    for (const entry of entries) {
-      if (ignores.has(entry.name)) {
-        skipped++;
-        continue;
-      }
-      const full = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(full);
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      totalFiles++;
-      let stat: import("node:fs").Stats;
-      try {
-        stat = await fs.stat(full);
-      } catch {
-        skipped++;
-        continue;
-      }
-      const rel = path.relative(projectDir, full);
-      const ext = path.extname(entry.name).toLowerCase() || "(none)";
-      byExtension[ext] = (byExtension[ext] ?? 0) + 1;
-      const item = { path: rel, modifiedAt: stat.mtime.toISOString(), size: stat.size, mtime: stat.mtimeMs };
-      newest.push(item);
-      newest.sort((a, b) => b.mtime - a.mtime);
-      if (newest.length > 12) newest.pop();
-      if (stat.mtimeMs >= recentCutoff) {
-        recent.push(item);
-        recent.sort((a, b) => b.mtime - a.mtime);
-        if (recent.length > 20) recent.pop();
-      }
-      if (totalFiles >= cfg.maxFiles) break;
-    }
-  }
-
-  return {
-    totalFiles,
-    skipped,
-    newest: newest.map(({ mtime, ...rest }) => rest),
-    recent: recent.map(({ mtime, ...rest }) => rest),
-    byExtension
-  };
-}
-
-async function scanGit(projectDir: string): Promise<GitSummary> {
-  const inside = await runCapture("git rev-parse --is-inside-work-tree", projectDir);
-  if (!inside.ok) return { available: false, error: (inside.error ?? inside.stderr ?? "git unavailable").trim().slice(0, 180) };
-
-  const [branch, status, lastCommit, upstream, divergence] = await Promise.all([
-    runCapture("git branch --show-current", projectDir),
-    runCapture("git status --short", projectDir),
-    runCapture("git log -1 --pretty=format:%h%x20%s", projectDir),
-    runCapture("git rev-parse --abbrev-ref --symbolic-full-name @{u}", projectDir),
-    runCapture("git rev-list --left-right --count @{u}...HEAD", projectDir)
-  ]);
-  const statusText = status.stdout.trim();
-  const divergenceParts = divergence.ok ? divergence.stdout.trim().split(/\s+/).map((part) => Number(part)) : [];
-  const behindBy = Number.isFinite(divergenceParts[0]) ? divergenceParts[0] : undefined;
-  const aheadBy = Number.isFinite(divergenceParts[1]) ? divergenceParts[1] : undefined;
-  return {
-    available: true,
-    branch: branch.stdout.trim() || undefined,
-    upstream: upstream.ok ? upstream.stdout.trim() || undefined : undefined,
-    status: statusText,
-    changedFiles: statusText ? statusText.split(/\r?\n/).filter(Boolean).length : 0,
-    aheadBy,
-    behindBy,
-    lastCommit: lastCommit.stdout.trim() || undefined
-  };
-}
-
-async function readPackageScripts(projectDir: string): Promise<string[]> {
-  const pkg = await readJsonFile<Record<string, unknown>>(path.join(projectDir, "package.json"), {});
-  if (!isRecord(pkg.scripts)) return [];
-  return Object.keys(pkg.scripts).sort();
-}
-
-async function checkPort(port: number): Promise<PortSummary> {
-  return await new Promise((resolve) => {
-    const socket = net.createConnection({ host: "127.0.0.1", port, timeout: 600 });
-    let done = false;
-    const finish = (open: boolean) => {
-      if (done) return;
-      done = true;
-      socket.destroy();
-      resolve({ port, open });
-    };
-    socket.on("connect", () => finish(true));
-    socket.on("timeout", () => finish(false));
-    socket.on("error", () => finish(false));
-  });
-}
-
-async function readLogTails(projectDir: string, files: string[]): Promise<Array<{ path: string; text: string; error?: string }>> {
-  const result: Array<{ path: string; text: string; error?: string }> = [];
-  for (const entry of files.slice(0, 8)) {
-    const file = path.isAbsolute(entry) ? entry : path.join(projectDir, entry);
-    try {
-      const raw = await fs.readFile(file, "utf-8");
-      result.push({ path: entry, text: clip(raw, 8_000) });
-    } catch (error) {
-      result.push({ path: entry, text: "", error: error instanceof Error ? error.message : String(error) });
-    }
-  }
-  return result;
-}
-
-function buildRisks(params: {
-  git: GitSummary;
-  fileScan: FileScanSummary;
-  ports: PortSummary[];
-  tasks: TaskRecord[];
-  staleAfterMs: number;
-}): { health: SupervisorHealth; risks: string[]; summary: string } {
-  const risks: string[] = [];
-  const failed = params.tasks.filter((task) => task.status === "failed" || task.status === "timeout");
-  const running = params.tasks.filter((task) => task.status === "running");
-  const lastActivity = params.fileScan.newest[0] ? Date.parse(params.fileScan.newest[0].modifiedAt) : 0;
-  const stale = lastActivity > 0 && Date.now() - lastActivity > params.staleAfterMs;
-  const closedPorts = params.ports.filter((port) => !port.open);
-
-  if (failed.length > 0) risks.push(`${failed.length} command task(s) failed or timed out.`);
-  if (running.length > 0) risks.push(`${running.length} command task(s) still running.`);
-  if (params.git.available && (params.git.changedFiles ?? 0) > 20) risks.push(`${params.git.changedFiles} git file changes are pending review.`);
-  if (params.git.available === false) risks.push("Git status is unavailable in this shell.");
-  if (stale) risks.push("No file activity within the configured stale window.");
-  if (closedPorts.length > 0) risks.push(`${closedPorts.length} watched port(s) are closed.`);
-
-  const health: SupervisorHealth = failed.length > 0 || stale ? "blocked" : risks.length > 0 ? "watch" : "ok";
-  const changed = params.git.available ? `${params.git.changedFiles ?? 0} git change(s)` : "git unavailable";
-  const recent = params.fileScan.recent.length;
-  const summary = `${health.toUpperCase()}: ${changed}, ${recent} recently touched file(s), ${running.length} running task(s), ${failed.length} failed task(s).`;
-  return { health, risks, summary };
-}
-
-function buildWorkerRisks(worker: WorkerState, instructions: SupervisorInstruction[]): string[] {
-  const risks: string[] = [];
-  const pending = instructions.filter((instruction) => instruction.status === "pending");
-  const failedInstructions = instructions.filter((instruction) => instruction.workerStatus === "failed");
-
-  if (worker.source === "missing") risks.push("Worker AI heartbeat is not connected yet.");
-  if (worker.source === "invalid") risks.push(`Worker AI heartbeat is invalid${worker.error ? `: ${worker.error}` : "."}`);
-  if (worker.status === "stuck") risks.push("Worker AI reports it is stuck.");
-  if (worker.status === "waiting" || worker.needsUserApproval) risks.push("Worker AI is waiting for user input or approval.");
-  if (worker.blocker) risks.push(`Worker blocker: ${worker.blocker}`);
-  if (pending.length > 0) risks.push(`${pending.length} supervisor instruction(s) pending approval.`);
-  if (failedInstructions.length > 0) risks.push(`${failedInstructions.length} dispatched instruction(s) failed in the worker AI.`);
-
-  return risks;
-}
-
-function buildSupervisionSignals(params: {
-  git: GitSummary;
-  tasks: TaskRecord[];
-  worker: WorkerState;
-  instructions: SupervisorInstruction[];
-  staleAfterMs: number;
-  nowMs?: number;
-}): SupervisionSignal[] {
-  const signals: SupervisionSignal[] = [];
-  const nowMs = params.nowMs ?? Date.now();
-  const pending = params.instructions.filter((instruction) => instruction.status === "pending");
-  const failedInstructions = params.instructions.filter((instruction) => instruction.workerStatus === "failed");
-  const runningTasks = params.tasks.filter((task) => task.status === "running");
-  const finishedTasks = params.tasks.filter((task) => task.status !== "running");
-  const latestFinished = finishedTasks.at(-1);
-
-  if (params.worker.source === "missing") {
-    signals.push({
-      id: "worker-heartbeat-missing",
-      severity: "watch",
-      title: "Worker heartbeat missing",
-      detail: "The worker AI has not reported heartbeat state for this project.",
-      command: "/supervise ai"
-    });
-  }
-
-  if (params.worker.source === "file" && (params.worker.status === "working" || params.worker.status === "idle")) {
-    const progressAt = params.worker.lastProgressAt ?? params.worker.lastActivityAt ?? params.worker.updatedAt;
-    const progressMs = progressAt ? Date.parse(progressAt) : 0;
-    if (progressMs > 0 && nowMs - progressMs > params.staleAfterMs) {
-      signals.push({
-        id: "worker-no-progress",
-        severity: nowMs - progressMs > params.staleAfterMs * 2 ? "critical" : "watch",
-        title: "Worker progress is stale",
-        detail: `No worker progress has been reported since ${progressAt}.`,
-        command: "/supervise review"
-      });
-    }
-  }
-
-  if (latestFinished && (latestFinished.status === "failed" || latestFinished.status === "timeout")) {
-    const previousSame = finishedTasks.slice(0, -1).reverse().find((task) => task.name === latestFinished.name);
-    if (previousSame && (previousSame.status === "failed" || previousSame.status === "timeout")) {
-      signals.push({
-        id: "repeated-command-failure",
-        severity: "critical",
-        title: "Command is failing repeatedly",
-        detail: `${latestFinished.name} failed or timed out in consecutive supervised runs.`,
-        command: "/supervise review"
-      });
-    }
-  }
-
-  if (failedInstructions.length >= 2) {
-    signals.push({
-      id: "repeated-worker-instruction-failure",
-      severity: "critical",
-      title: "Worker instruction failures repeated",
-      detail: `${failedInstructions.length} dispatched instruction(s) have failed in the worker AI.`,
-      command: "/supervise pending"
-    });
-  }
-
-  if (pending.length > 0) {
-    signals.push({
-      id: "pending-human-decision",
-      severity: "watch",
-      title: "Human decision pending",
-      detail: `${pending.length} instruction(s) are waiting for approval or rejection.`,
-      command: `/supervise approve ${pending[pending.length - 1].id}`
-    });
-  }
-
-  if (params.worker.status === "done" && params.git.available && (params.git.changedFiles ?? 0) > 0) {
-    signals.push({
-      id: "worker-done-review-ready",
-      severity: "watch",
-      title: "Worker finished with local changes",
-      detail: `${params.git.changedFiles} changed file(s) are ready for review.`,
-      command: "/supervise run check"
-    });
-  } else if (params.git.available && (params.git.changedFiles ?? 0) > 0 && runningTasks.length === 0) {
-    signals.push({
-      id: "local-changes-ready",
-      severity: "info",
-      title: "Local changes need review",
-      detail: `${params.git.changedFiles} changed file(s) are present with no supervised command running.`,
-      command: "/supervise review"
-    });
-  }
-
-  if (params.git.available && (params.git.aheadBy ?? 0) > 0) {
-    signals.push({
-      id: "git-ahead-unpushed",
-      severity: "watch",
-      title: "Local commits are not pushed",
-      detail: `${params.git.aheadBy} commit(s) are ahead of ${params.git.upstream ?? "upstream"}.`,
-      command: "/supervise review"
-    });
-  }
-
-  if (params.git.available && (params.git.behindBy ?? 0) > 0) {
-    signals.push({
-      id: "git-behind-upstream",
-      severity: "watch",
-      title: "Branch is behind upstream",
-      detail: `${params.git.behindBy} upstream commit(s) are not in the local branch.`,
-      command: "/supervise review"
-    });
-  }
-
-  return signals.slice(0, 10);
-}
-
-function updateNotificationsFromSignals(params: {
-  projectId: string;
-  snapshotId: string;
-  existing: SupervisorNotification[];
-  signals: SupervisionSignal[];
-  cooldownMs: number;
-  maxNotifications: number;
-  now?: string;
-}): SupervisorNotification[] {
-  const now = params.now ?? nowIso();
-  const nowMs = Date.parse(now);
-  const activeSignals = params.signals.filter((signal): signal is SupervisionSignal & { severity: "watch" | "critical" } => {
-    return signal.severity === "watch" || signal.severity === "critical";
-  });
-  const activeKeys = new Set(activeSignals.map((signal) => `${params.projectId}:${signal.id}`));
-  const out = params.existing.map((notification) => ({ ...notification }));
-  const byKey = new Map<string, SupervisorNotification>();
-
-  for (const notification of out) {
-    byKey.set(`${notification.projectId}:${notification.signalId}`, notification);
-  }
-
-  for (const signal of activeSignals) {
-    const key = `${params.projectId}:${signal.id}`;
-    const existing = byKey.get(key);
-    if (!existing) {
-      out.push({
-        id: toId(key),
-        projectId: params.projectId,
-        signalId: signal.id,
-        severity: signal.severity,
-        title: signal.title,
-        detail: signal.detail,
-        command: signal.command,
-        status: "open",
-        createdAt: now,
-        updatedAt: now,
-        lastSeenAt: now,
-        occurrenceCount: 1,
-        sourceSnapshotId: params.snapshotId
-      });
-      continue;
-    }
-
-    const cooldownExpired = nowMs - Date.parse(existing.updatedAt) >= params.cooldownMs;
-    const shouldOpen = existing.status === "open" || cooldownExpired;
-    existing.severity = signal.severity;
-    existing.title = signal.title;
-    existing.detail = signal.detail;
-    existing.command = signal.command;
-    existing.lastSeenAt = now;
-    existing.sourceSnapshotId = params.snapshotId;
-    existing.occurrenceCount = (existing.occurrenceCount || 0) + 1;
-    if (shouldOpen) {
-      existing.status = "open";
-      existing.updatedAt = now;
-      existing.resolvedAt = undefined;
-      if (cooldownExpired) {
-        existing.acknowledgedAt = undefined;
-        existing.acknowledgedBy = undefined;
-      }
-    }
-  }
-
-  for (const notification of out) {
-    const key = `${notification.projectId}:${notification.signalId}`;
-    if (notification.projectId === params.projectId && notification.status === "open" && !activeKeys.has(key)) {
-      notification.status = "resolved";
-      notification.resolvedAt = now;
-      notification.updatedAt = now;
-    }
-  }
-
-  return out
-    .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
-    .slice(-params.maxNotifications);
-}
-
-function combineHealth(projectHealth: SupervisorHealth, worker: WorkerState, instructions: SupervisorInstruction[]): SupervisorHealth {
-  if (projectHealth === "blocked" || worker.status === "stuck") return "blocked";
-  if (worker.source === "invalid") return "blocked";
-  if (instructions.some((instruction) => instruction.workerStatus === "failed")) return "blocked";
-  if (projectHealth === "watch") return "watch";
-  if (worker.source === "missing" || worker.status === "waiting" || worker.needsUserApproval) return "watch";
-  if (instructions.some((instruction) => instruction.status === "pending")) return "watch";
-  return "ok";
-}
-
-function buildNextActions(params: {
-  projectHealth: SupervisorHealth;
-  git: GitSummary;
-  tasks: TaskRecord[];
-  worker: WorkerState;
-  instructions: SupervisorInstruction[];
-}): SupervisorNextAction[] {
-  const actions: SupervisorNextAction[] = [];
-  const failed = params.tasks.filter((task) => task.status === "failed" || task.status === "timeout");
-  const running = params.tasks.filter((task) => task.status === "running");
-  const pending = params.instructions.filter((instruction) => instruction.status === "pending");
-  const failedInstructions = params.instructions.filter((instruction) => instruction.workerStatus === "failed");
-
-  if (failed.length > 0) {
-    actions.push({
-      id: "inspect-failed-task",
-      priority: "high",
-      title: "Inspect failed supervised task",
-      detail: `${failed.length} command task(s) failed or timed out. Review the latest task log before continuing.`,
-      command: "/supervise status"
-    });
-  }
-
-  if (failedInstructions.length > 0) {
-    actions.push({
-      id: "review-failed-instruction",
-      priority: "high",
-      title: "Review failed worker instruction",
-      detail: failedInstructions[failedInstructions.length - 1].workerMessage ?? "The worker AI reported an instruction failure.",
-      command: "/supervise pending"
-    });
-  }
-
-  if (params.worker.status === "stuck") {
-    actions.push({
-      id: "unstick-worker",
-      priority: "high",
-      title: "Give the worker AI a focused next instruction",
-      detail: params.worker.blocker ?? "The worker AI reports it is stuck and needs a narrower instruction.",
-      command: "/supervise tell <instruction>"
-    });
-  }
-
-  if (params.worker.status === "waiting" || params.worker.needsUserApproval) {
-    actions.push({
-      id: "respond-to-worker",
-      priority: "high",
-      title: "Respond to the worker AI",
-      detail: params.worker.currentStep ?? params.worker.blocker ?? "The worker AI is waiting for user approval or input.",
-      command: "/supervise tell <instruction>"
-    });
-  }
-
-  if (pending.length > 0) {
-    actions.push({
-      id: "review-pending-instructions",
-      priority: "medium",
-      title: "Review pending supervisor instructions",
-      detail: `${pending.length} instruction(s) are waiting for approval or rejection.`,
-      command: `/supervise approve ${pending[0].id}`
-    });
-  }
-
-  if (params.worker.source === "missing") {
-    actions.push({
-      id: "connect-worker-heartbeat",
-      priority: "medium",
-      title: "Connect worker AI heartbeat",
-      detail: "Create or update .project-supervisor/worker-state.json so the supervisor can see what the worker AI is doing."
-    });
-  }
-
-  if (params.git.available && (params.git.changedFiles ?? 0) > 0) {
-    actions.push({
-      id: "review-git-changes",
-      priority: "medium",
-      title: "Review local Git changes",
-      detail: `${params.git.changedFiles} changed file(s) are present. Run checks before committing or pushing.`,
-      command: "/supervise run test"
-    });
-  }
-
-  if (running.length > 0) {
-    actions.push({
-      id: "wait-running-task",
-      priority: "low",
-      title: "Wait for running task",
-      detail: `${running.length} supervised command task(s) are still running.`
-    });
-  }
-
-  if (actions.length === 0 && params.projectHealth === "ok" && params.worker.status === "working") {
-    actions.push({
-      id: "continue-current-plan",
-      priority: "low",
-      title: "Let the worker continue",
-      detail: params.worker.currentStep ?? "Project and worker state look healthy."
-    });
-  }
-
-  if (actions.length === 0) {
-    actions.push({
-      id: "run-status-check",
-      priority: "low",
-      title: "Keep monitoring",
-      detail: "No urgent action is required. Use /supervise scan after the next meaningful change."
-    });
-  }
-
-  return actions.slice(0, 8);
-}
-
-function normalizeAllowedCommands(value: SupervisorConfig["allowedCommands"]): Record<string, SupervisorCommand> {
-  const source = value && Object.keys(value).length > 0 ? value : DEFAULT_COMMANDS;
-  const out: Record<string, SupervisorCommand> = {};
-  for (const [name, raw] of Object.entries(source)) {
-    if (!/^[a-zA-Z0-9_-]{1,32}$/.test(name)) continue;
-    if (typeof raw === "string") out[name] = { title: name, command: raw };
-    else if (raw && typeof raw.command === "string") out[name] = { title: raw.title || name, command: raw.command, timeoutMs: raw.timeoutMs };
-  }
-  return out;
-}
-
-export function normalizeSupervisorConfig(input: SupervisorConfig = {}): Required<Omit<SupervisorConfig, "allowedCommands">> & { allowedCommands: Record<string, SupervisorCommand> } {
-  const projectDir = path.resolve(input.projectDir ?? DEFAULT_PROJECT_DIR);
-  const stateFile = path.resolve(input.stateFile ?? path.join(projectDir, ".project-supervisor", "state.json"));
-  const stateDir = path.dirname(stateFile);
-  const supervisorHome = path.resolve(process.env.OPENCLAW_SUPERVISOR_HOME ?? path.join(path.dirname(projectDir), ".project-supervisor"));
-  const projectId = input.projectId?.trim() || path.basename(projectDir).toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "project";
-  return {
-    projectId,
-    projectDir,
-    stateFile,
-    workerStateFile: path.resolve(input.workerStateFile ?? path.join(stateDir, "worker-state.json")),
-    workerInboxFile: path.resolve(input.workerInboxFile ?? path.join(stateDir, "inbox.jsonl")),
-    workerOutboxFile: path.resolve(input.workerOutboxFile ?? path.join(stateDir, "outbox.jsonl")),
-    auditFile: path.resolve(input.auditFile ?? path.join(stateDir, "audit.jsonl")),
-    projectRegistryFile: path.resolve(input.projectRegistryFile ?? path.join(supervisorHome, "projects.json")),
-    defaultWorkerId: input.defaultWorkerId?.trim() || "worker-ai",
-    host: input.host ?? "127.0.0.1",
-    port: parsePositiveInt(input.port, DEFAULT_PORT),
-    publicUrl: input.publicUrl ?? "",
-    token: input.token ?? "",
-    autoStartServer: input.autoStartServer !== false,
-    scanIntervalMs: parsePositiveInt(input.scanIntervalMs, DEFAULT_SCAN_INTERVAL_MS),
-    staleAfterMs: parsePositiveInt(input.staleAfterMs, DEFAULT_STALE_AFTER_MS),
-    maxFiles: parsePositiveInt(input.maxFiles, DEFAULT_MAX_FILES),
-    maxHistory: parsePositiveInt(input.maxHistory, DEFAULT_MAX_HISTORY),
-    maxInstructions: parsePositiveInt(input.maxInstructions, DEFAULT_MAX_INSTRUCTIONS),
-    maxNotifications: parsePositiveInt(input.maxNotifications, DEFAULT_MAX_NOTIFICATIONS),
-    maxTaskLogChars: parsePositiveInt(input.maxTaskLogChars, DEFAULT_MAX_TASK_LOG_CHARS),
-    commandTimeoutMs: parsePositiveInt(input.commandTimeoutMs, DEFAULT_COMMAND_TIMEOUT_MS),
-    notificationCooldownMs: parsePositiveInt(input.notificationCooldownMs, DEFAULT_NOTIFICATION_COOLDOWN_MS),
-    watchedPorts: Array.isArray(input.watchedPorts) ? input.watchedPorts.filter((p) => Number.isInteger(p) && p > 0 && p < 65536) : [],
-    logFiles: Array.isArray(input.logFiles) ? input.logFiles.filter((p) => typeof p === "string" && p.trim()).slice(0, 8) : [],
-    ignoreDirs: Array.isArray(input.ignoreDirs) ? input.ignoreDirs.filter((p) => typeof p === "string" && p.trim()) : [],
-    allowedCommands: normalizeAllowedCommands(input.allowedCommands)
-  };
-}
-
-type NormalizedSupervisorConfig = ReturnType<typeof normalizeSupervisorConfig>;
-
 function projectEntryFromConfig(cfg: NormalizedSupervisorConfig, existing?: ProjectRegistryEntry, seenAt = nowIso()): ProjectRegistryEntry {
   return {
     id: cfg.projectId,
@@ -1215,6 +447,7 @@ function configForRegistryEntry(
     workerOutboxFile: entry.workerOutboxFile,
     auditFile: entry.auditFile,
     projectRegistryFile: base.projectRegistryFile,
+    accountRegistryFile: base.accountRegistryFile,
     defaultWorkerId: base.defaultWorkerId,
     host: base.host,
     port: base.port,
@@ -1490,6 +723,43 @@ export class ProjectSupervisor {
     return status ? notifications.filter((notification) => notification.status === status) : notifications;
   }
 
+  async listNotificationOutbox(): Promise<SupervisorNotification[]> {
+    const state = await this.readState();
+    return state.notifications
+      .filter((notification) => notification.projectId === this.cfg.projectId)
+      .filter((notification) => notification.status === "open")
+      .filter((notification) => (notification.deliveryStatus ?? "pending") !== "delivered")
+      .slice(-20)
+      .reverse();
+  }
+
+  async markNotificationDelivery(params: {
+    id: string;
+    status: Extract<SupervisorNotificationDeliveryStatus, "delivered" | "failed">;
+    error?: string;
+  }): Promise<SupervisorNotification> {
+    const notificationId = params.id.trim();
+    if (!notificationId) throw new Error("Notification id is required.");
+    const state = await this.readState();
+    const notification = state.notifications.find((entry) => entry.id === notificationId || entry.signalId === notificationId);
+    if (!notification) throw new Error(`Notification "${notificationId}" was not found.`);
+    if (notification.projectId !== this.cfg.projectId) throw new Error(`Notification "${notificationId}" does not belong to this project.`);
+    const now = nowIso();
+    notification.deliveryStatus = params.status;
+    notification.lastDeliveryAt = now;
+    notification.deliveryAttempts = (notification.deliveryAttempts ?? 0) + 1;
+    notification.deliveryError = params.status === "failed" ? params.error?.trim() || "delivery failed" : undefined;
+    notification.updatedAt = now;
+    await this.writeState(state);
+    await this.audit("notification_delivery_marked", {
+      id: notification.id,
+      signalId: notification.signalId,
+      status: notification.deliveryStatus,
+      error: notification.deliveryError
+    });
+    return notification;
+  }
+
   async acknowledgeNotification(id: string, acknowledgedBy = "human"): Promise<SupervisorNotification> {
     const state = await this.readState();
     const notification = state.notifications.find((entry) => entry.id === id || entry.signalId === id);
@@ -1578,7 +848,11 @@ export class ProjectSupervisor {
       nextActions: snapshot.nextActions,
       signals: snapshot.signals ?? [],
       notifications: notifications.slice(-10).reverse(),
-      panelUrl: this.getPanelUrl()
+      accounts: [],
+      quotaWindows: [],
+      quotaLogSources: [],
+      quotaLogCursors: [],
+      panelUrl: stripUrlToken(this.getPanelUrl())
     };
   }
 
@@ -1829,181 +1103,29 @@ export class ProjectSupervisor {
     const token = await this.ensureToken();
     this.server = createServer((req, res) => {
       this.handleHttp(req, res, token).catch((error) => {
-        res.statusCode = 500;
-        res.setHeader("Content-Type", "application/json; charset=utf-8");
-        res.end(JSON.stringify({ error: String(error) }));
+        writeHttpError(res, error);
       });
     });
     await new Promise<void>((resolve, reject) => {
       this.server?.once("error", reject);
       this.server?.listen(this.cfg.port, this.cfg.host, () => resolve());
     });
-    this.logger.info?.(`project-supervisor panel: ${this.getPanelUrl()}`);
+    this.logger.info?.(`project-supervisor panel: ${redactUrlToken(this.getPanelUrl())}`);
   }
 
   async handleHttp(req: IncomingMessage, res: ServerResponse, token = this.token): Promise<boolean> {
-    const authToken = token || await this.ensureToken();
-    const parsed = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-    if (parsed.pathname.startsWith("/plugins/project-supervisor")) {
-      parsed.pathname = parsed.pathname.replace(/^\/plugins\/project-supervisor/, "") || "/";
-    }
-    if (!this.isAuthorized(req, parsed, authToken)) {
-      json(res, 401, { error: "unauthorized" });
-      return true;
-    }
-    if (req.method === "GET" && parsed.pathname === "/") {
-      res.statusCode = 200;
-      res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.end(renderDashboardHtml(authToken));
-      return true;
-    }
-    if (req.method === "GET" && parsed.pathname === "/api/overview") {
-      json(res, 200, await this.getOverview());
-      return true;
-    }
-    if (req.method === "GET" && parsed.pathname === "/api/status") {
-      json(res, 200, { snapshot: await this.latest(), commands: Object.keys(this.cfg.allowedCommands), panelUrl: this.getPanelUrl() });
-      return true;
-    }
-    if (req.method === "GET" && parsed.pathname === "/api/worker") {
-      json(res, 200, { worker: await this.getWorkerState() });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/worker-heartbeat") {
-      const body = await readBodyJson(req);
-      if (!isRecord(body)) throw new Error("Worker heartbeat body must be an object.");
-      const rawStatus = body.status;
-      const status = rawStatus === undefined ? undefined : parseWorkerStatusStrict(rawStatus);
-      if (rawStatus !== undefined && !status) throw new Error("A valid worker status is required.");
-      json(res, 200, { worker: await this.updateWorkerHeartbeat({
-        workerId: optionalString(body.workerId),
-        status,
-        goal: optionalString(body.goal),
-        currentStep: optionalString(body.currentStep) ?? optionalString(body.step),
-        plan: body.plan,
-        lastProgressAt: optionalString(body.lastProgressAt),
-        lastActivityAt: optionalString(body.lastActivityAt),
-        needsUserApproval: typeof body.needsUserApproval === "boolean" ? body.needsUserApproval : undefined,
-        blocker: body.blocker === null ? null : optionalString(body.blocker),
-        markProgress: body.markProgress === true
-      }) });
-      return true;
-    }
-    if (req.method === "GET" && parsed.pathname === "/api/worker-inbox") {
-      const includeAcknowledged = parsed.searchParams.get("includeAcknowledged") === "1" || parsed.searchParams.get("includeAcknowledged") === "true";
-      const workerId = parsed.searchParams.get("workerId") ?? undefined;
-      json(res, 200, { instructions: await this.listWorkerInbox({ workerId, includeAcknowledged }) });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/worker-ack") {
-      const body = await readBodyJson(req);
-      const instructionId = isRecord(body) && typeof body.instructionId === "string"
-        ? body.instructionId
-        : isRecord(body) && typeof body.id === "string"
-          ? body.id
-          : "";
-      const status = parseWorkerInstructionStatus(isRecord(body) ? body.status : undefined);
-      if (!status) throw new Error("A valid worker instruction status is required.");
-      const message = isRecord(body) && typeof body.message === "string" ? body.message : undefined;
-      const workerId = isRecord(body) && typeof body.workerId === "string" ? body.workerId : undefined;
-      json(res, 200, { event: await this.acknowledgeWorkerInstruction({ instructionId, status, message, workerId }) });
-      return true;
-    }
-    if (req.method === "GET" && parsed.pathname === "/api/instructions") {
-      const status = parsed.searchParams.get("status");
-      const parsedStatus: InstructionStatus | undefined =
-        status === "pending" || status === "approved" || status === "rejected" || status === "dispatched" ? status : undefined;
-      json(res, 200, { instructions: await this.listInstructions(parsedStatus) });
-      return true;
-    }
-    if (req.method === "GET" && parsed.pathname === "/api/notifications") {
-      const status = parsed.searchParams.get("status");
-      const parsedStatus: SupervisorNotificationStatus | undefined =
-        status === "open" || status === "acknowledged" || status === "resolved" ? status : undefined;
-      json(res, 200, { notifications: await this.listNotifications(parsedStatus) });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/ack-notification") {
-      const body = await readBodyJson(req);
-      const id = isRecord(body) && typeof body.id === "string" ? body.id : "";
-      const acknowledgedBy = isRecord(body) && typeof body.acknowledgedBy === "string" ? body.acknowledgedBy : "human";
-      json(res, 200, { notification: await this.acknowledgeNotification(id, acknowledgedBy) });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/ack-notifications") {
-      const body = await readBodyJson(req);
-      const acknowledgedBy = isRecord(body) && typeof body.acknowledgedBy === "string" ? body.acknowledgedBy : "human";
-      json(res, 200, { notifications: await this.acknowledgeOpenNotifications(acknowledgedBy) });
-      return true;
-    }
-    if (req.method === "GET" && parsed.pathname === "/api/projects") {
-      json(res, 200, { registry: await this.readProjectRegistry() });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/scan") {
-      json(res, 200, { snapshot: await this.scan() });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/register-project") {
-      json(res, 200, { project: await this.registerCurrentProject(), registry: await this.readProjectRegistry() });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/run") {
-      const body = await readBodyJson(req);
-      const command = isRecord(body) && typeof body.command === "string" ? body.command : "";
-      json(res, 200, { task: await this.runAllowedCommand(command) });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/propose") {
-      const body = await readBodyJson(req);
-      const instruction = isRecord(body) && typeof body.instruction === "string" ? body.instruction : "";
-      json(res, 200, { instruction: await this.createInstruction({ instruction, createdBy: "supervisor", source: "http" }) });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/tell") {
-      const body = await readBodyJson(req);
-      const instruction = isRecord(body) && typeof body.instruction === "string" ? body.instruction : "";
-      json(res, 200, { instruction: await this.createInstruction({ instruction, createdBy: "human", source: "http", approve: true }) });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/approve") {
-      const body = await readBodyJson(req);
-      const id = isRecord(body) && typeof body.id === "string" ? body.id : "";
-      json(res, 200, { instruction: await this.approveInstruction(id) });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/approve-latest") {
-      json(res, 200, { instruction: await this.approveLatestPendingInstruction() });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/reject") {
-      const body = await readBodyJson(req);
-      const id = isRecord(body) && typeof body.id === "string" ? body.id : "";
-      const reason = isRecord(body) && typeof body.reason === "string" ? body.reason : undefined;
-      json(res, 200, { instruction: await this.rejectInstruction(id, reason) });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/reject-latest") {
-      const body = await readBodyJson(req);
-      const reason = isRecord(body) && typeof body.reason === "string" ? body.reason : undefined;
-      json(res, 200, { instruction: await this.rejectLatestPendingInstruction(reason) });
-      return true;
-    }
-    json(res, 404, { error: "not found" });
-    return true;
+    return await handleSupervisorHttp({
+      kind: "project",
+      supervisor: this,
+      ensureToken: () => this.ensureToken()
+    }, req, res, token);
   }
 
-  private isAuthorized(req: IncomingMessage, parsed: URL, token: string): boolean {
-    if (!token) return true;
-    const queryToken = parsed.searchParams.get("token");
-    if (queryToken === token) return true;
-    const auth = req.headers.authorization;
-    return auth === `Bearer ${token}`;
-  }
 }
 
 export class ProjectSupervisorHub {
   private readonly root: ProjectSupervisor;
+  private readonly quotaService: CodexQuotaService;
   private readonly logger: Logger;
   private readonly supervisors = new Map<string, ProjectSupervisor>();
   private server: ReturnType<typeof createServer> | null = null;
@@ -2012,6 +1134,7 @@ export class ProjectSupervisorHub {
 
   constructor(config: SupervisorConfig = {}, logger: Logger = {}) {
     this.root = new ProjectSupervisor(config, logger);
+    this.quotaService = new CodexQuotaService(this.root.getConfig().accountRegistryFile, this.root.getConfig().maxNotifications);
     this.logger = logger;
   }
 
@@ -2102,6 +1225,8 @@ export class ProjectSupervisorHub {
   }
 
   async scan(): Promise<SupervisorSnapshot> {
+    await this.scanQuotaLogs();
+    await this.quotaService.reconcile();
     return await (await this.getActiveSupervisor()).scan();
   }
 
@@ -2122,15 +1247,161 @@ export class ProjectSupervisorHub {
   }
 
   async listNotifications(status?: SupervisorNotificationStatus): Promise<SupervisorNotification[]> {
-    return await (await this.getActiveSupervisor()).listNotifications(status);
+    const [projectNotifications, quotaNotifications] = await Promise.all([
+      (await this.getActiveSupervisor()).listNotifications(status),
+      this.quotaService.listNotifications(status)
+    ]);
+    return [...projectNotifications, ...quotaNotifications]
+      .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  }
+
+  async listNotificationOutbox(): Promise<SupervisorNotification[]> {
+    const [projectNotifications, quotaNotifications] = await Promise.all([
+      (await this.getActiveSupervisor()).listNotificationOutbox(),
+      this.quotaService.listNotificationOutbox()
+    ]);
+    return [...projectNotifications, ...quotaNotifications]
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, 20);
+  }
+
+  async markNotificationDelivery(params: {
+    id: string;
+    status: Extract<SupervisorNotificationDeliveryStatus, "delivered" | "failed">;
+    error?: string;
+  }): Promise<SupervisorNotification> {
+    const quotaNotification = await this.quotaService.markNotificationDelivery(params.id, params.status, params.error);
+    if (quotaNotification) return quotaNotification;
+    return await (await this.getActiveSupervisor()).markNotificationDelivery(params);
   }
 
   async acknowledgeNotification(id: string, acknowledgedBy = "human"): Promise<SupervisorNotification> {
+    const quotaNotification = await this.quotaService.acknowledgeNotification(id, acknowledgedBy);
+    if (quotaNotification) return quotaNotification;
     return await (await this.getActiveSupervisor()).acknowledgeNotification(id, acknowledgedBy);
   }
 
   async acknowledgeOpenNotifications(acknowledgedBy = "human"): Promise<SupervisorNotification[]> {
-    return await (await this.getActiveSupervisor()).acknowledgeOpenNotifications(acknowledgedBy);
+    const [projectNotifications, quotaNotifications] = await Promise.all([
+      (await this.getActiveSupervisor()).acknowledgeOpenNotifications(acknowledgedBy),
+      this.quotaService.acknowledgeOpenNotifications(acknowledgedBy)
+    ]);
+    return [...projectNotifications, ...quotaNotifications];
+  }
+
+  async getQuotaRegistry(): Promise<QuotaRegistry> {
+    await this.quotaService.reconcile();
+    return await this.quotaService.read();
+  }
+
+  async registerAccount(input: RegisterAccountInput): Promise<CodexAccount> {
+    return await this.quotaService.registerAccount(input);
+  }
+
+  async removeAccount(id: string): Promise<void> {
+    await this.quotaService.removeAccount(id);
+  }
+
+  async setQuota(input: SetQuotaInput): Promise<QuotaWindow> {
+    const window = await this.quotaService.setQuota(input);
+    await this.quotaService.reconcile();
+    return (await this.quotaService.read()).windows.find((entry) => entry.accountId === window.accountId && entry.id === window.id) ?? window;
+  }
+
+  async renderAccountsText(): Promise<string> {
+    await this.quotaService.reconcile();
+    return await this.quotaService.renderText();
+  }
+
+  async registerQuotaLogSource(input: RegisterQuotaLogSourceInput): Promise<QuotaLogSource> {
+    return await this.quotaService.registerLogSource(input);
+  }
+
+  async removeQuotaLogSource(id: string): Promise<void> {
+    await this.quotaService.removeLogSource(id);
+  }
+
+  async scanQuotaLogs(): Promise<Array<{
+    sourceId: string;
+    linesRead: number;
+    candidates: number;
+    matched: number;
+    rotated: boolean;
+    skippedBytes: number;
+    error?: string;
+  }>> {
+    const registry = await this.quotaService.read();
+    const cursorBySource = new Map(registry.logCursors.map((cursor) => [cursor.sourceId, cursor]));
+    const sources = registry.logSources.filter((source) => source.enabled);
+    const polls = await Promise.all(sources.map((source) => pollQuotaLogSource(source, cursorBySource.get(source.id))));
+    const summaries: Array<{ sourceId: string; linesRead: number; candidates: number; matched: number; rotated: boolean; skippedBytes: number; error?: string }> = [];
+    for (let index = 0; index < sources.length; index++) {
+      const source = sources[index];
+      const poll = polls[index];
+      const candidates = poll.lines.filter(isQuotaSignalCandidate);
+      let matched = 0;
+      for (const line of candidates) {
+        const result = await this.observeQuotaSignal({
+          accountId: source.accountId,
+          text: line,
+          windowId: source.windowId,
+          quotaType: source.quotaType
+        });
+        if (result.observation.matched) matched++;
+      }
+      await this.quotaService.updateLogCursor(poll.cursor);
+      summaries.push({
+        sourceId: source.id,
+        linesRead: poll.lines.length,
+        candidates: candidates.length,
+        matched,
+        rotated: poll.rotated,
+        skippedBytes: poll.skippedBytes,
+        error: poll.cursor.lastError
+      });
+    }
+    return summaries;
+  }
+
+  async observeQuotaSignal(input: {
+    accountId: string;
+    text: string;
+    observedAt?: string;
+    windowId?: string;
+    quotaType?: SetQuotaInput["quotaType"];
+  }): Promise<{ observation: CodexQuotaObservation; window?: QuotaWindow }> {
+    const accountId = input.accountId.trim();
+    const observation = parseCodexQuotaSignal({
+      text: input.text,
+      observedAt: input.observedAt,
+      windowId: input.windowId,
+      quotaType: input.quotaType
+    });
+    await this.quotaService.recordObservation({
+      accountId,
+      windowId: observation.windowId,
+      matched: observation.matched,
+      status: observation.status,
+      quotaType: observation.quotaType,
+      resetAt: observation.resetAt,
+      observedAt: observation.observedAt,
+      evidenceHash: observation.evidenceHash,
+      parserVersion: observation.parserVersion,
+      reason: observation.reason
+    });
+    if (!observation.matched || !observation.status || !observation.windowId || !observation.quotaType) return { observation };
+    const window = await this.setQuota({
+      accountId,
+      id: observation.windowId,
+      label: observation.windowId,
+      quotaType: observation.quotaType,
+      status: observation.status,
+      resetAt: observation.status === "available" ? null : observation.resetAt,
+      observedAt: observation.observedAt,
+      source: observation.source,
+      confidence: observation.confidence
+    });
+    return { observation, window };
   }
 
   async listWorkerInbox(params: { workerId?: string; includeAcknowledged?: boolean } = {}): Promise<WorkerInboxInstruction[]> {
@@ -2149,10 +1420,12 @@ export class ProjectSupervisorHub {
   async getOverview(): Promise<SupervisorOverview> {
     const active = await this.getActiveSupervisor();
     const snapshot = await active.latest();
-    const [registry, instructions, notifications] = await Promise.all([
+    await this.quotaService.reconcile();
+    const [registry, instructions, notifications, quotaRegistry] = await Promise.all([
       this.readProjectRegistry(),
       active.listInstructions(),
-      active.listNotifications("open")
+      this.listNotifications("open"),
+      this.getQuotaRegistry()
     ]);
     const activeProject = registry.projects.find((project) => project.id === active.getConfig().projectId)
       ?? projectEntryFromConfig(active.getConfig(), undefined, snapshot.scannedAt);
@@ -2166,7 +1439,11 @@ export class ProjectSupervisorHub {
       nextActions: snapshot.nextActions,
       signals: snapshot.signals ?? [],
       notifications: notifications.slice(-10).reverse(),
-      panelUrl: this.getPanelUrl()
+      accounts: quotaRegistry.accounts,
+      quotaWindows: quotaRegistry.windows,
+      quotaLogSources: quotaRegistry.logSources,
+      quotaLogCursors: quotaRegistry.logCursors,
+      panelUrl: stripUrlToken(this.getPanelUrl())
     };
   }
 
@@ -2216,763 +1493,33 @@ export class ProjectSupervisorHub {
     this.token = token;
     this.server = createServer((req, res) => {
       this.handleHttp(req, res, token).catch((error) => {
-        res.statusCode = 500;
-        res.setHeader("Content-Type", "application/json; charset=utf-8");
-        res.end(JSON.stringify({ error: String(error) }));
+        writeHttpError(res, error);
       });
     });
     await new Promise<void>((resolve, reject) => {
       this.server?.once("error", reject);
       this.server?.listen(this.root.getConfig().port, this.root.getConfig().host, () => resolve());
     });
-    this.logger.info?.(`project-supervisor panel: ${this.getPanelUrl()}`);
+    this.logger.info?.(`project-supervisor panel: ${redactUrlToken(this.getPanelUrl())}`);
   }
 
   async handleHttp(req: IncomingMessage, res: ServerResponse, token = this.token): Promise<boolean> {
-    const authToken = token || await this.root.ensureToken();
-    this.token = authToken;
-    const parsed = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-    if (parsed.pathname.startsWith("/plugins/project-supervisor")) {
-      parsed.pathname = parsed.pathname.replace(/^\/plugins\/project-supervisor/, "") || "/";
-    }
-    if (!this.isAuthorized(req, parsed, authToken)) {
-      json(res, 401, { error: "unauthorized" });
-      return true;
-    }
-    if (req.method === "GET" && parsed.pathname === "/") {
-      res.statusCode = 200;
-      res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.end(renderDashboardHtml(authToken));
-      return true;
-    }
-    if (req.method === "GET" && parsed.pathname === "/api/overview") {
-      json(res, 200, await this.getOverview());
-      return true;
-    }
-    if (req.method === "GET" && parsed.pathname === "/api/status") {
-      const active = await this.getActiveSupervisor();
-      json(res, 200, {
-        snapshot: await active.latest(),
-        commands: Object.keys(active.getConfig().allowedCommands),
-        panelUrl: this.getPanelUrl(),
-        registry: await this.readProjectRegistry()
-      });
-      return true;
-    }
-    if (req.method === "GET" && parsed.pathname === "/api/worker") {
-      json(res, 200, { worker: await this.getWorkerState() });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/worker-heartbeat") {
-      const body = await readBodyJson(req);
-      if (!isRecord(body)) throw new Error("Worker heartbeat body must be an object.");
-      const rawStatus = body.status;
-      const status = rawStatus === undefined ? undefined : parseWorkerStatusStrict(rawStatus);
-      if (rawStatus !== undefined && !status) throw new Error("A valid worker status is required.");
-      json(res, 200, { worker: await this.updateWorkerHeartbeat({
-        workerId: optionalString(body.workerId),
-        status,
-        goal: optionalString(body.goal),
-        currentStep: optionalString(body.currentStep) ?? optionalString(body.step),
-        plan: body.plan,
-        lastProgressAt: optionalString(body.lastProgressAt),
-        lastActivityAt: optionalString(body.lastActivityAt),
-        needsUserApproval: typeof body.needsUserApproval === "boolean" ? body.needsUserApproval : undefined,
-        blocker: body.blocker === null ? null : optionalString(body.blocker),
-        markProgress: body.markProgress === true
-      }) });
-      return true;
-    }
-    if (req.method === "GET" && parsed.pathname === "/api/worker-inbox") {
-      const includeAcknowledged = parsed.searchParams.get("includeAcknowledged") === "1" || parsed.searchParams.get("includeAcknowledged") === "true";
-      const workerId = parsed.searchParams.get("workerId") ?? undefined;
-      json(res, 200, { instructions: await this.listWorkerInbox({ workerId, includeAcknowledged }) });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/worker-ack") {
-      const body = await readBodyJson(req);
-      const instructionId = isRecord(body) && typeof body.instructionId === "string"
-        ? body.instructionId
-        : isRecord(body) && typeof body.id === "string"
-          ? body.id
-          : "";
-      const status = parseWorkerInstructionStatus(isRecord(body) ? body.status : undefined);
-      if (!status) throw new Error("A valid worker instruction status is required.");
-      const message = isRecord(body) && typeof body.message === "string" ? body.message : undefined;
-      const workerId = isRecord(body) && typeof body.workerId === "string" ? body.workerId : undefined;
-      json(res, 200, { event: await this.acknowledgeWorkerInstruction({ instructionId, status, message, workerId }) });
-      return true;
-    }
-    if (req.method === "GET" && parsed.pathname === "/api/instructions") {
-      const status = parsed.searchParams.get("status");
-      const parsedStatus: InstructionStatus | undefined =
-        status === "pending" || status === "approved" || status === "rejected" || status === "dispatched" ? status : undefined;
-      json(res, 200, { instructions: await this.listInstructions(parsedStatus) });
-      return true;
-    }
-    if (req.method === "GET" && parsed.pathname === "/api/notifications") {
-      const status = parsed.searchParams.get("status");
-      const parsedStatus: SupervisorNotificationStatus | undefined =
-        status === "open" || status === "acknowledged" || status === "resolved" ? status : undefined;
-      json(res, 200, { notifications: await this.listNotifications(parsedStatus) });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/ack-notification") {
-      const body = await readBodyJson(req);
-      const id = isRecord(body) && typeof body.id === "string" ? body.id : "";
-      const acknowledgedBy = isRecord(body) && typeof body.acknowledgedBy === "string" ? body.acknowledgedBy : "human";
-      json(res, 200, { notification: await this.acknowledgeNotification(id, acknowledgedBy) });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/ack-notifications") {
-      const body = await readBodyJson(req);
-      const acknowledgedBy = isRecord(body) && typeof body.acknowledgedBy === "string" ? body.acknowledgedBy : "human";
-      json(res, 200, { notifications: await this.acknowledgeOpenNotifications(acknowledgedBy) });
-      return true;
-    }
-    if (req.method === "GET" && parsed.pathname === "/api/projects") {
-      json(res, 200, { registry: await this.readProjectRegistry() });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/scan") {
-      json(res, 200, { snapshot: await this.scan(), registry: await this.readProjectRegistry() });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/register-project") {
-      const body = await readBodyJson(req);
-      const projectDir = isRecord(body) && typeof body.projectDir === "string" ? body.projectDir : "";
-      const projectId = isRecord(body) && typeof body.projectId === "string" ? body.projectId : undefined;
-      const project = projectDir ? await this.registerProject(projectDir, projectId) : await this.registerCurrentProject();
-      json(res, 200, { project, registry: await this.readProjectRegistry() });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/activate-project") {
-      const body = await readBodyJson(req);
-      const id = isRecord(body) && typeof body.id === "string"
-        ? body.id
-        : isRecord(body) && typeof body.projectId === "string"
-          ? body.projectId
-          : "";
-      const project = await this.activateProject(id);
-      json(res, 200, { project, registry: await this.readProjectRegistry() });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/run") {
-      const body = await readBodyJson(req);
-      const command = isRecord(body) && typeof body.command === "string" ? body.command : "";
-      json(res, 200, { task: await this.runAllowedCommand(command) });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/propose") {
-      const body = await readBodyJson(req);
-      const instruction = isRecord(body) && typeof body.instruction === "string" ? body.instruction : "";
-      json(res, 200, { instruction: await this.createInstruction({ instruction, createdBy: "supervisor", source: "http" }) });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/tell") {
-      const body = await readBodyJson(req);
-      const instruction = isRecord(body) && typeof body.instruction === "string" ? body.instruction : "";
-      json(res, 200, { instruction: await this.createInstruction({ instruction, createdBy: "human", source: "http", approve: true }) });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/approve") {
-      const body = await readBodyJson(req);
-      const id = isRecord(body) && typeof body.id === "string" ? body.id : "";
-      json(res, 200, { instruction: await this.approveInstruction(id) });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/approve-latest") {
-      json(res, 200, { instruction: await this.approveLatestPendingInstruction() });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/reject") {
-      const body = await readBodyJson(req);
-      const id = isRecord(body) && typeof body.id === "string" ? body.id : "";
-      const reason = isRecord(body) && typeof body.reason === "string" ? body.reason : undefined;
-      json(res, 200, { instruction: await this.rejectInstruction(id, reason) });
-      return true;
-    }
-    if (req.method === "POST" && parsed.pathname === "/api/reject-latest") {
-      const body = await readBodyJson(req);
-      const reason = isRecord(body) && typeof body.reason === "string" ? body.reason : undefined;
-      json(res, 200, { instruction: await this.rejectLatestPendingInstruction(reason) });
-      return true;
-    }
-    json(res, 404, { error: "not found" });
-    return true;
+    return await handleSupervisorHttp({
+      kind: "hub",
+      supervisor: this,
+      ensureToken: () => this.root.ensureToken(),
+      rememberToken: (value) => { this.token = value; }
+    }, req, res, token);
   }
 
-  private isAuthorized(req: IncomingMessage, parsed: URL, token: string): boolean {
-    if (!token) return true;
-    const queryToken = parsed.searchParams.get("token");
-    if (queryToken === token) return true;
-    const auth = req.headers.authorization;
-    return auth === `Bearer ${token}`;
-  }
-}
-
-async function readBodyJson(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(Buffer.from(chunk));
-  if (chunks.length === 0) return {};
-  return JSON.parse(Buffer.concat(chunks).toString("utf-8"));
-}
-
-function json(res: ServerResponse, statusCode: number, body: unknown): void {
-  res.statusCode = statusCode;
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.end(JSON.stringify(body));
-}
-
-function readArg(args: string[], name: string): string | undefined {
-  const index = args.indexOf(name);
-  if (index < 0) return undefined;
-  const value = args[index + 1];
-  return value && !value.startsWith("--") ? value : undefined;
-}
-
-function readBooleanArg(args: string[], name: string, inverseName?: string): boolean | undefined {
-  if (inverseName && args.includes(inverseName)) return false;
-  if (!args.includes(name)) return undefined;
-  const raw = readArg(args, name);
-  if (!raw) return true;
-  return /^(1|true|yes|y)$/i.test(raw);
-}
-
-function renderDashboardHtml(token: string): string {
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Project Supervisor</title>
-  <style>
-    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, Segoe UI, sans-serif; }
-    body { margin: 0; background: #f7f4ed; color: #1f2933; }
-    main { max-width: 1080px; margin: 0 auto; padding: 20px; }
-    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
-    h1 { font-size: 26px; margin: 0; letter-spacing: 0; }
-    button, select, textarea { min-height: 38px; border-radius: 6px; border: 1px solid #9aa5b1; background: #ffffff; color: #1f2933; padding: 0 12px; font: inherit; }
-    button { cursor: pointer; }
-    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; }
-    .inline-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-    .panel { border: 1px solid #d3cec4; border-radius: 8px; background: #fffdf8; padding: 14px; margin-bottom: 12px; }
-    .metric { font-size: 12px; color: #52606d; }
-    .value { font-size: 24px; font-weight: 700; margin-top: 4px; }
-    .ok { color: #207227; } .watch { color: #9a5b00; } .blocked { color: #b42318; }
-    pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 13px; line-height: 1.45; }
-    textarea { box-sizing: border-box; min-height: 76px; padding: 10px 12px; resize: vertical; width: 100%; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    td, th { text-align: left; border-bottom: 1px solid #e4ded4; padding: 8px 4px; vertical-align: top; }
-    @media (max-width: 760px) { main { padding: 12px; } header { align-items: flex-start; flex-direction: column; } .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  </style>
-</head>
-<body>
-  <main>
-    <header>
-      <div>
-        <h1>Project Supervisor</h1>
-        <div id="sub" class="metric">Loading...</div>
-      </div>
-      <div class="toolbar">
-        <button onclick="refresh(true)">Refresh</button>
-        <select id="project"></select>
-        <button onclick="activateProject()">Use</button>
-        <select id="command"></select>
-        <button onclick="runCommand()">Run</button>
-      </div>
-    </header>
-    <section class="grid">
-      <div class="panel"><div class="metric">Health</div><div id="health" class="value">-</div></div>
-      <div class="panel"><div class="metric">Git Changes</div><div id="changes" class="value">-</div></div>
-      <div class="panel"><div class="metric">Recent Files</div><div id="recent" class="value">-</div></div>
-      <div class="panel"><div class="metric">Tasks</div><div id="tasks" class="value">-</div></div>
-    </section>
-    <section class="panel"><h2>Summary</h2><pre id="summary"></pre></section>
-    <section class="panel"><h2>Risks</h2><pre id="risks"></pre></section>
-    <section class="panel"><h2>Signals</h2><pre id="signals"></pre></section>
-    <section class="panel">
-      <h2>Alerts</h2>
-      <table id="notifications"></table>
-      <div class="inline-actions"><button onclick="ackAllNotifications()">Acknowledge All</button></div>
-    </section>
-    <section class="panel"><h2>Worker AI</h2><pre id="worker"></pre></section>
-    <section class="panel"><h2>Next Actions</h2><pre id="nextActions"></pre></section>
-    <section class="panel">
-      <h2>Instruction</h2>
-      <textarea id="instructionInput" placeholder="Instruction"></textarea>
-      <div class="inline-actions">
-        <button onclick="proposeInstruction()">Propose</button>
-        <button onclick="tellInstruction()">Tell</button>
-        <button onclick="pauseWorker()">Pause</button>
-      </div>
-    </section>
-    <section class="panel"><h2>Pending Instructions</h2><table id="instructions"></table></section>
-    <section class="panel"><h2>Recent Files</h2><table id="files"></table></section>
-    <section class="panel"><h2>Tasks</h2><table id="taskTable"></table></section>
-  </main>
-  <script>
-    const token = new URLSearchParams(location.search).get("token") || ${JSON.stringify(token)};
-    async function api(path, options = {}) {
-      const url = path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token);
-      const res = await fetch(url, { ...options, headers: { "content-type": "application/json", ...(options.headers || {}) } });
-      if (!res.ok) throw new Error(await res.text());
-      return await res.json();
-    }
-    function esc(value) {
-      return String(value ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-    }
-    function rows(items, cols) {
-      return "<tbody>" + items.map(item => "<tr>" + cols.map(col => "<td>" + esc(col(item)) + "</td>").join("") + "</tr>").join("") + "</tbody>";
-    }
-    function pendingRows(items) {
-      if (!items.length) return "<tbody><tr><td colspan='5'>None</td></tr></tbody>";
-      return "<tbody>" + items.map(item => "<tr>"
-        + "<td>" + esc(item.id) + "</td>"
-        + "<td>" + esc(item.targetWorker) + "</td>"
-        + "<td>" + esc(item.instruction) + "</td>"
-        + "<td>" + esc(item.createdAt) + "</td>"
-        + "<td><button onclick=\"approveInstruction('" + esc(item.id) + "')\">Approve</button> <button onclick=\"rejectInstruction('" + esc(item.id) + "')\">Reject</button></td>"
-        + "</tr>").join("") + "</tbody>";
-    }
-    function notificationRows(items) {
-      if (!items.length) return "<tbody><tr><td colspan='5'>None</td></tr></tbody>";
-      return "<tbody>" + items.map(item => "<tr>"
-        + "<td>" + esc(item.severity) + "</td>"
-        + "<td>" + esc(item.title) + "</td>"
-        + "<td>" + esc(item.detail) + "</td>"
-        + "<td>" + esc(item.updatedAt) + "</td>"
-        + "<td><button onclick=\"ackNotification('" + esc(item.id) + "')\">Ack</button></td>"
-        + "</tr>").join("") + "</tbody>";
-    }
-    function updateProjects(registry) {
-      const select = document.getElementById("project");
-      if (!registry || !Array.isArray(registry.projects)) {
-        select.innerHTML = "";
-        return;
-      }
-      const current = select.value || registry.activeProjectId || "";
-      select.innerHTML = "";
-      for (const project of registry.projects) {
-        const opt = document.createElement("option");
-        opt.value = project.id;
-        opt.textContent = project.id + (project.id === registry.activeProjectId ? " *" : "");
-        select.appendChild(opt);
-      }
-      select.value = registry.projects.some(p => p.id === current) ? current : (registry.activeProjectId || "");
-    }
-    async function refresh(force) {
-      if (force) await api("/api/scan", { method: "POST", body: "{}" });
-      const data = await api("/api/overview");
-      const s = data.snapshot;
-      updateProjects(data.registry || s.projects);
-      document.getElementById("sub").textContent = s.projectDir + " | " + s.scannedAt;
-      const h = document.getElementById("health");
-      h.textContent = s.health.toUpperCase();
-      h.className = "value " + s.health;
-      document.getElementById("changes").textContent = s.git.available ? s.git.changedFiles : "n/a";
-      document.getElementById("recent").textContent = s.fileScan.recent.length;
-      document.getElementById("tasks").textContent = s.tasks.length;
-      document.getElementById("summary").textContent = s.summary + "\\nGit: " + (s.git.available ? s.git.status || "clean" : s.git.error);
-      document.getElementById("risks").textContent = s.risks.length ? s.risks.map(r => "- " + r).join("\\n") : "- none";
-      document.getElementById("signals").textContent = (data.signals || []).length ? data.signals.map(x => "- [" + x.severity + "] " + x.title + ": " + x.detail + (x.command ? " (" + x.command + ")" : "")).join("\\n") : "- none";
-      document.getElementById("notifications").innerHTML = notificationRows(data.notifications || []);
-      document.getElementById("worker").textContent = [
-        "Worker: " + s.worker.workerId,
-        "Status: " + s.worker.status,
-        "Source: " + s.worker.source,
-        "Goal: " + (s.worker.goal || "(not reported)"),
-        "Step: " + (s.worker.currentStep || "(not reported)"),
-        "Needs approval: " + (s.worker.needsUserApproval ? "yes" : "no"),
-        "Blocker: " + (s.worker.blocker || "(none)")
-      ].join("\\n");
-      document.getElementById("nextActions").textContent = data.nextActions.length ? data.nextActions.map(a => "- [" + a.priority + "] " + a.title + ": " + a.detail + (a.command ? " (" + a.command + ")" : "")).join("\\n") : "- none";
-      document.getElementById("instructions").innerHTML = pendingRows((data.pendingInstructions || []).slice(-12).reverse());
-      document.getElementById("files").innerHTML = rows(s.fileScan.recent, [x => x.path, x => x.modifiedAt, x => x.size + " B"]);
-      document.getElementById("taskTable").innerHTML = rows(s.tasks.slice(-12).reverse(), [x => x.name, x => x.status, x => x.startedAt, x => (x.log || "").slice(-240)]);
-      const select = document.getElementById("command");
-      if (data.commands) {
-        const current = select.value;
-        select.innerHTML = "";
-        for (const command of data.commands) {
-          const opt = document.createElement("option");
-          opt.value = command; opt.textContent = command; select.appendChild(opt);
-        }
-        if (data.commands.includes(current)) select.value = current;
-      }
-    }
-    async function runCommand() {
-      const command = document.getElementById("command").value;
-      await api("/api/run", { method: "POST", body: JSON.stringify({ command }) });
-      await refresh(false);
-    }
-    async function activateProject() {
-      const id = document.getElementById("project").value;
-      if (!id) return;
-      await api("/api/activate-project", { method: "POST", body: JSON.stringify({ id }) });
-      await refresh(true);
-    }
-    async function approveInstruction(id) {
-      await api("/api/approve", { method: "POST", body: JSON.stringify({ id }) });
-      await refresh(true);
-    }
-    async function rejectInstruction(id) {
-      const reason = prompt("Reason") || "";
-      await api("/api/reject", { method: "POST", body: JSON.stringify({ id, reason }) });
-      await refresh(true);
-    }
-    async function ackNotification(id) {
-      await api("/api/ack-notification", { method: "POST", body: JSON.stringify({ id, acknowledgedBy: "dashboard" }) });
-      await refresh(true);
-    }
-    async function ackAllNotifications() {
-      await api("/api/ack-notifications", { method: "POST", body: JSON.stringify({ acknowledgedBy: "dashboard" }) });
-      await refresh(true);
-    }
-    async function proposeInstruction() {
-      const input = document.getElementById("instructionInput");
-      const instruction = input.value.trim();
-      if (!instruction) return;
-      await api("/api/propose", { method: "POST", body: JSON.stringify({ instruction }) });
-      input.value = "";
-      await refresh(true);
-    }
-    async function tellInstruction() {
-      const input = document.getElementById("instructionInput");
-      const instruction = input.value.trim();
-      if (!instruction) return;
-      await api("/api/tell", { method: "POST", body: JSON.stringify({ instruction }) });
-      input.value = "";
-      await refresh(true);
-    }
-    async function pauseWorker() {
-      await api("/api/tell", { method: "POST", body: JSON.stringify({ instruction: "Pause current work, do not make further edits, and report current status and blockers." }) });
-      await refresh(true);
-    }
-    refresh(false).catch(err => document.getElementById("summary").textContent = err.message);
-    setInterval(() => refresh(false).catch(() => {}), 5000);
-  </script>
-</body>
-</html>`;
-}
-
-function configFromPluginApi(api: any): SupervisorConfig {
-  const pluginConfig = isRecord(api?.pluginConfig)
-    ? api.pluginConfig
-    : isRecord(api?.config?.plugins?.entries?.["qq-study-router"]?.config)
-      ? api.config.plugins.entries["qq-study-router"].config
-      : isRecord(api?.config?.plugins?.["qq-study-router"])
-        ? api.config.plugins["qq-study-router"]
-        : {};
-  const raw = isRecord(pluginConfig.projectSupervisor) ? pluginConfig.projectSupervisor : pluginConfig;
-  const allowedCommands = isRecord(raw.allowedCommands) ? raw.allowedCommands as Record<string, string | SupervisorCommand> : undefined;
-  return {
-    projectId: typeof raw.projectId === "string" ? raw.projectId : undefined,
-    projectDir: typeof raw.projectDir === "string" ? raw.projectDir : undefined,
-    stateFile: typeof raw.stateFile === "string" ? raw.stateFile : undefined,
-    workerStateFile: typeof raw.workerStateFile === "string" ? raw.workerStateFile : undefined,
-    workerInboxFile: typeof raw.workerInboxFile === "string" ? raw.workerInboxFile : undefined,
-    workerOutboxFile: typeof raw.workerOutboxFile === "string" ? raw.workerOutboxFile : undefined,
-    auditFile: typeof raw.auditFile === "string" ? raw.auditFile : undefined,
-    projectRegistryFile: typeof raw.projectRegistryFile === "string" ? raw.projectRegistryFile : undefined,
-    defaultWorkerId: typeof raw.defaultWorkerId === "string" ? raw.defaultWorkerId : undefined,
-    host: typeof raw.host === "string" ? raw.host : undefined,
-    publicUrl: typeof raw.publicUrl === "string" ? raw.publicUrl : undefined,
-    token: typeof raw.token === "string" ? raw.token : undefined,
-    port: typeof raw.port === "number" || typeof raw.port === "string" ? Number(raw.port) : undefined,
-    autoStartServer: typeof raw.autoStartServer === "boolean" ? raw.autoStartServer : undefined,
-    scanIntervalMs: typeof raw.scanIntervalMs === "number" ? raw.scanIntervalMs : undefined,
-    staleAfterMs: typeof raw.staleAfterMs === "number" ? raw.staleAfterMs : undefined,
-    maxFiles: typeof raw.maxFiles === "number" ? raw.maxFiles : undefined,
-    maxHistory: typeof raw.maxHistory === "number" ? raw.maxHistory : undefined,
-    maxInstructions: typeof raw.maxInstructions === "number" ? raw.maxInstructions : undefined,
-    maxNotifications: typeof raw.maxNotifications === "number" ? raw.maxNotifications : undefined,
-    maxTaskLogChars: typeof raw.maxTaskLogChars === "number" ? raw.maxTaskLogChars : undefined,
-    commandTimeoutMs: typeof raw.commandTimeoutMs === "number" ? raw.commandTimeoutMs : undefined,
-    notificationCooldownMs: typeof raw.notificationCooldownMs === "number" ? raw.notificationCooldownMs : undefined,
-    watchedPorts: Array.isArray(raw.watchedPorts) ? raw.watchedPorts as number[] : undefined,
-    logFiles: Array.isArray(raw.logFiles) ? raw.logFiles as string[] : undefined,
-    ignoreDirs: Array.isArray(raw.ignoreDirs) ? raw.ignoreDirs as string[] : undefined,
-    allowedCommands
-  };
-}
-
-let singleton: ProjectSupervisorHub | null = null;
-
-export function getProjectSupervisorForTests(): ProjectSupervisorHub | null {
-  return singleton;
-}
-
-export function registerProjectSupervisor(api: any): void {
-  const supervisor = new ProjectSupervisorHub(configFromPluginApi(api), api.logger ?? {});
-  singleton = supervisor;
-
-  api.registerService?.({
-    id: "project-supervisor-service",
-    start: async () => {
-      await supervisor.ensureStarted();
-    },
-    stop: async () => {
-      await supervisor.stop();
-    }
-  });
-
-  api.lifecycle?.registerRuntimeLifecycle?.({
-    id: "project-supervisor-cleanup",
-    cleanup: async () => {
-      await supervisor.stop();
-    }
-  });
-
-  api.registerHttpRoute?.({
-    path: "/plugins/project-supervisor",
-    auth: "gateway",
-    match: "prefix",
-    replaceExisting: true,
-    handler: async (req: IncomingMessage, res: ServerResponse) => {
-      return await supervisor.handleHttp(req, res);
-    }
-  });
-
-  api.registerCommand?.({
-    name: "supervise",
-    nativeNames: { default: "supervise" },
-    description: "Show or control the local Project Supervisor.",
-    acceptsArgs: true,
-    requireAuth: true,
-    handler: async (ctx: any) => {
-      await supervisor.ensureStarted();
-      const args = String(ctx.args ?? "").trim();
-      if (!args || /^status$/i.test(args)) return { text: await supervisor.renderTextStatus(false) };
-      if (/^ai$/i.test(args)) return { text: await supervisor.renderWorkerText() };
-      if (/^(pending|instructions)$/i.test(args)) return { text: await supervisor.renderInstructionsText() };
-      if (/^projects$/i.test(args)) return { text: await supervisor.renderProjectsText() };
-      if (/^review$/i.test(args)) {
-        const overview = await supervisor.getOverview();
-        const pending = overview.pendingInstructions.slice(-5).reverse();
-        return {
-          text: [
-            `Active project: ${overview.activeProject.id}`,
-            `Health: ${overview.snapshot.health}`,
-            `Worker: ${overview.snapshot.worker.workerId}:${overview.snapshot.worker.status}`,
-            `Step: ${overview.snapshot.worker.currentStep ?? "(not reported)"}`,
-            "Signals:",
-            ...(overview.signals.length > 0
-              ? overview.signals.map((signal) => `- [${signal.severity}] ${signal.title}: ${signal.detail}${signal.command ? ` (${signal.command})` : ""}`)
-              : ["- none"]),
-            "Alerts:",
-            ...(overview.notifications.length > 0
-              ? overview.notifications.map((notification) => `- [${notification.severity}] ${notification.id}/${notification.signalId}: ${notification.title}: ${notification.detail}`)
-              : ["- none"]),
-            "Next actions:",
-            ...overview.nextActions.map((action) => `- [${action.priority}] ${action.title}: ${action.detail}${action.command ? ` (${action.command})` : ""}`),
-            "Pending instructions:",
-            ...(pending.length > 0
-              ? pending.map((instruction) => `- ${instruction.id} -> ${instruction.targetWorker}: ${instruction.instruction}`)
-              : ["- none"])
-          ].join("\n")
-        };
-      }
-      if (/^(alerts|notifications)$/i.test(args)) {
-        const notifications = (await supervisor.listNotifications("open")).slice(-8).reverse();
-        return {
-          text: notifications.length > 0
-            ? notifications.map((notification) => [
-              `${notification.id} [${notification.severity}] ${notification.signalId}`,
-              notification.title,
-              notification.detail,
-              notification.command ? `command: ${notification.command}` : null,
-              `seen: ${notification.lastSeenAt}, count: ${notification.occurrenceCount}`
-            ].filter((line) => line !== null).join("\n")).join("\n\n")
-            : "No open supervisor alerts."
-        };
-      }
-      if (/^ack\s+(alerts?|notifications?|all)$/i.test(args)) {
-        const notifications = await supervisor.acknowledgeOpenNotifications("mobile");
-        return { text: `Acknowledged ${notifications.length} open supervisor alert(s).` };
-      }
-      const ackNotificationMatch = /^ack\s+([a-zA-Z0-9_-]+)$/i.exec(args);
-      if (ackNotificationMatch) {
-        const notification = await supervisor.acknowledgeNotification(ackNotificationMatch[1], "mobile");
-        return { text: `Acknowledged alert ${notification.id} (${notification.signalId}).` };
-      }
-      const registerMatch = /^(register|register-project)(?:\s+([\s\S]+))?$/i.exec(args);
-      if (registerMatch) {
-        const projectDir = registerMatch[2]?.trim();
-        const project = projectDir ? await supervisor.registerProject(projectDir) : await supervisor.registerCurrentProject();
-        return { text: `Registered project ${project.id}:\n${project.projectDir}` };
-      }
-      const activateMatch = /^(activate|use)\s+([a-zA-Z0-9_-]+)$/i.exec(args);
-      if (activateMatch) {
-        const project = await supervisor.activateProject(activateMatch[2]);
-        return { text: `Active project is now ${project.id}:\n${project.projectDir}` };
-      }
-      if (/^(scan|refresh)$/i.test(args)) return { text: await supervisor.renderTextStatus(true) };
-      if (/^(url|panel)$/i.test(args)) return { text: `Project Supervisor panel:\n${supervisor.getPanelUrl()}` };
-      const proposeMatch = /^propose(?:\s+([\s\S]+))?$/i.exec(args);
-      if (proposeMatch) {
-        const instructionText = proposeMatch[1]?.trim();
-        if (!instructionText) {
-          const snapshot = await supervisor.latest();
-          return {
-            text: [
-              "Recommended next actions:",
-              ...snapshot.nextActions.map((action) => `- [${action.priority}] ${action.title}: ${action.detail}${action.command ? ` (${action.command})` : ""}`)
-            ].join("\n")
-          };
-        }
-        const instruction = await supervisor.createInstruction({ instruction: instructionText, createdBy: "supervisor", source: "mobile" });
-        return { text: `Created pending instruction ${instruction.id}.\nApprove with /supervise approve ${instruction.id}` };
-      }
-      const tellMatch = /^tell\s+([\s\S]+)$/i.exec(args);
-      if (tellMatch) {
-        const instruction = await supervisor.createInstruction({ instruction: tellMatch[1], createdBy: "human", source: "mobile", approve: true });
-        return { text: `Dispatched instruction ${instruction.id} to ${instruction.targetWorker}.` };
-      }
-      if (/^pause$/i.test(args)) {
-        const instruction = await supervisor.createInstruction({
-          instruction: "Pause current work, do not make further edits, and report current status and blockers.",
-          createdBy: "human",
-          source: "mobile",
-          approve: true
-        });
-        return { text: `Dispatched pause instruction ${instruction.id} to ${instruction.targetWorker}.` };
-      }
-      if (/^approve\s+latest$/i.test(args)) {
-        const instruction = await supervisor.approveLatestPendingInstruction();
-        return { text: `Approved and dispatched latest pending instruction ${instruction.id} to ${instruction.targetWorker}.` };
-      }
-      const approveMatch = /^approve\s+([a-f0-9]{8,32})$/i.exec(args);
-      if (approveMatch) {
-        const instruction = await supervisor.approveInstruction(approveMatch[1]);
-        return { text: `Approved and dispatched ${instruction.id} to ${instruction.targetWorker}.` };
-      }
-      const rejectLatestMatch = /^reject\s+latest(?:\s+([\s\S]+))?$/i.exec(args);
-      if (rejectLatestMatch) {
-        const instruction = await supervisor.rejectLatestPendingInstruction(rejectLatestMatch[1]);
-        return { text: `Rejected latest pending instruction ${instruction.id}.` };
-      }
-      const rejectMatch = /^reject\s+([a-f0-9]{8,32})(?:\s+([\s\S]+))?$/i.exec(args);
-      if (rejectMatch) {
-        const instruction = await supervisor.rejectInstruction(rejectMatch[1], rejectMatch[2]);
-        return { text: `Rejected ${instruction.id}.` };
-      }
-      const runMatch = /^run\s+([a-zA-Z0-9_-]+)$/i.exec(args);
-      if (runMatch) {
-        const task = await supervisor.runAllowedCommand(runMatch[1]);
-        return { text: `Started ${task.name} (${task.id}).\n${await supervisor.renderTextStatus(false)}` };
-      }
-      return {
-        text: [
-          "Project Supervisor commands:",
-          "/supervise status",
-          "/supervise ai",
-          "/supervise review",
-          "/supervise alerts",
-          "/supervise ack alerts",
-          "/supervise ack <alert-id-or-signal-id>",
-          "/supervise projects",
-          "/supervise register",
-          "/supervise register <project-dir>",
-          "/supervise activate <project-id>",
-          "/supervise scan",
-          "/supervise propose",
-          "/supervise propose <instruction>",
-          "/supervise approve latest",
-          "/supervise approve <instruction-id>",
-          "/supervise reject latest",
-          "/supervise reject <instruction-id>",
-          "/supervise tell <instruction>",
-          "/supervise pause",
-          "/supervise url",
-          "/supervise run build",
-          "/supervise run test",
-          `Allowed commands: ${Object.keys((await supervisor.getActiveSupervisor()).getConfig().allowedCommands).join(", ")}`
-        ].join("\n")
-      };
-    }
-  });
-}
-
-async function startCli(): Promise<void> {
-  const args = process.argv.slice(2);
-  const projectIndex = args.indexOf("--project");
-  const portIndex = args.indexOf("--port");
-  const workerIdIndex = args.indexOf("--worker-id");
-  const baseConfig: SupervisorConfig = {
-    projectDir: projectIndex >= 0 ? args[projectIndex + 1] : undefined,
-    port: portIndex >= 0 ? Number(args[portIndex + 1]) : undefined,
-    host: "0.0.0.0"
-  };
-
-  const heartbeatIndex = args.indexOf("--worker-heartbeat");
-  if (heartbeatIndex >= 0) {
-    const rawStatus = args[heartbeatIndex + 1] && !args[heartbeatIndex + 1].startsWith("--") ? args[heartbeatIndex + 1] : undefined;
-    const status = rawStatus ? parseWorkerStatusStrict(rawStatus) : undefined;
-    if (rawStatus && !status) throw new Error("Usage: --worker-heartbeat [unknown|working|waiting|idle|stuck|done] [--goal <text>] [--step <text>] [--plan-json <json>] [--worker-id <id>]");
-    const planJson = readArg(args, "--plan-json");
-    const planFile = readArg(args, "--plan-file");
-    const plan = planJson
-      ? JSON.parse(planJson)
-      : planFile
-        ? JSON.parse(await fs.readFile(path.resolve(planFile), "utf-8"))
-        : undefined;
-    const supervisor = new ProjectSupervisorHub({ ...baseConfig, autoStartServer: false }, console);
-    const worker = await supervisor.updateWorkerHeartbeat({
-      workerId: workerIdIndex >= 0 ? args[workerIdIndex + 1] : undefined,
-      status,
-      goal: readArg(args, "--goal"),
-      currentStep: readArg(args, "--step") ?? readArg(args, "--current-step"),
-      plan,
-      needsUserApproval: readBooleanArg(args, "--needs-approval", "--no-approval"),
-      blocker: args.includes("--clear-blocker") ? null : readArg(args, "--blocker"),
-      markProgress: args.includes("--progress")
-    });
-    console.log(JSON.stringify({ worker }, null, 2));
-    return;
-  }
-
-  if (args.includes("--worker-inbox")) {
-    const supervisor = new ProjectSupervisorHub({ ...baseConfig, autoStartServer: false }, console);
-    const instructions = await supervisor.listWorkerInbox({
-      workerId: workerIdIndex >= 0 ? args[workerIdIndex + 1] : undefined,
-      includeAcknowledged: args.includes("--include-acknowledged")
-    });
-    console.log(JSON.stringify({ instructions }, null, 2));
-    return;
-  }
-
-  const ackIndex = args.indexOf("--worker-ack");
-  if (ackIndex >= 0) {
-    const instructionId = args[ackIndex + 1] ?? "";
-    const status = parseWorkerInstructionStatus(args[ackIndex + 2]);
-    if (!status) throw new Error("Usage: --worker-ack <instruction-id> <received|started|completed|failed|ignored> [--message <text>] [--worker-id <id>]");
-    const messageIndex = args.indexOf("--message");
-    const supervisor = new ProjectSupervisorHub({ ...baseConfig, autoStartServer: false }, console);
-    const event = await supervisor.acknowledgeWorkerInstruction({
-      instructionId,
-      status,
-      message: messageIndex >= 0 ? args.slice(messageIndex + 1).join(" ") : undefined,
-      workerId: workerIdIndex >= 0 ? args[workerIdIndex + 1] : undefined
-    });
-    console.log(JSON.stringify({ event }, null, 2));
-    return;
-  }
-
-  if (!args.includes("--serve")) return;
-  const supervisor = new ProjectSupervisorHub({
-    ...baseConfig,
-    host: "0.0.0.0"
-  }, console);
-  await supervisor.ensureStarted();
-  console.log(`Project Supervisor panel: ${supervisor.getPanelUrl()}`);
 }
 
 const currentFile = fileURLToPath(import.meta.url);
 if (process.argv[1] && path.resolve(process.argv[1]) === currentFile) {
-  startCli().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
+  import("./supervisor-cli.js")
+    .then(({ startSupervisorCli }) => startSupervisorCli())
+    .catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
 }

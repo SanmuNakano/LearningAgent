@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { registerProjectSupervisor } from "./supervisor.js";
+import { registerProjectSupervisor } from "./supervisor-openclaw.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 

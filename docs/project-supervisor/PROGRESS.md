@@ -49,3 +49,45 @@
 - Added `POST /api/worker-heartbeat`, `--worker-heartbeat`, and `npm run supervisor:worker:heartbeat`.
 - Heartbeat writes normalize worker plan items, preserve omitted fields, refresh activity timestamps, and optionally mark progress.
 - Verified Phase 8 with `npm run check`; test suite is now 44 passing tests.
+- Started Phase 9: notification delivery adapter support and HTTP hardening.
+- Added a notification delivery outbox, delivery acknowledgement API/CLI, attempt tracking, and retry-visible failure state.
+- Fixed delivered notifications being incorrectly re-queued by every periodic scan; material signal changes and cooldown-based reopen events still queue a fresh delivery.
+- Dashboard URL tokens are now exchanged for an HttpOnly, SameSite cookie and removed from the browser URL; startup logs redact the token.
+- Dashboard API calls now retain the OpenClaw `/plugins/project-supervisor` route prefix.
+- Added a 1 MiB JSON request-body limit and shared HTTP authentication/error helpers.
+- Verified Phase 9 with `npm run check`; test suite is now 47 passing tests.
+- Started Phase 10: Codex multi-account quota calendar.
+- Added a central account registry that stores account metadata without credentials.
+- Added rolling, daily, weekly, monthly, credits, and custom quota windows with explicit source and confidence labels.
+- Added reset reconciliation that moves exhausted windows to `available_unverified` and emits one deduplicated notification per reset.
+- Merged quota recovery notifications into the existing notification outbox, delivery acknowledgement, and mobile alert flow.
+- Added account/quota HTTP APIs, OpenClaw commands, and dashboard controls.
+- Added serialized, atomic account-registry writes and tests for concurrent updates, multiple accounts with different reset times, reminder deduplication, and HTTP integration.
+- Verified Phase 10 with `npm run check`; test suite is now 51 passing tests.
+- Started Phase 11: Codex client limit-signal adapter.
+- Added a versioned parser for English/Chinese exhaustion and recovery messages, absolute timestamps, Unix reset fields, and relative reset durations.
+- Added privacy-safe observation history: raw messages are discarded and only normalized fields plus a SHA-256 evidence hash are retained.
+- Added false-positive protection so unrelated and ambiguous messages are recorded without changing quota state.
+- Added `POST /api/quotas/observe`, `/supervise quota observe`, dashboard signal input, and `--quota-observe`/`--text-file` CLI support.
+- Fixed a future-tense parsing regression where `resets at` could be mistaken for an already restored quota.
+- Verified Phase 11 with `npm run check`; test suite is now 56 passing tests.
+- Started Phase 12: automatic Codex quota log watcher.
+- Added account-bound log source registration with authenticated HTTP, OpenClaw commands, and dashboard controls.
+- Added persisted byte cursors and file identity tracking for incremental reads across supervisor restarts.
+- Added partial-line handling, file truncation/replacement detection, 256 KiB read limits, candidate-line filtering, and sanitized source errors.
+- Integrated log polling into the normal supervisor scan interval and the existing quota observation/reminder pipeline.
+- Added tests for append-only reads, incomplete tails, truncation/rotation, missing files, cursor deduplication, and end-to-end account updates.
+- New log sources start at the current file end by default to prevent stale historical alerts; controlled backfill is opt-in.
+- Verified Phase 12 with `npm run check`; test suite is now 60 passing tests.
+- Started Phase 13: architecture stabilization before further product work.
+- Extracted HTTP authentication/body/response utilities, the standalone CLI, the browser dashboard, and the OpenClaw lifecycle/command adapter from the supervisor core.
+- Preserved the historical `node dist/supervisor.js` CLI entry through a dynamic adapter import.
+- Changed `index.ts` to depend on the OpenClaw adapter instead of coupling platform registration to the core module.
+- Added an architecture document with dependency direction, state ownership, and staged refactoring rules.
+- Added focused adapter-boundary tests; the suite is now 64 passing tests.
+
+## 2026-07-10
+
+- Replaced the duplicated single-project and hub HTTP endpoint branches with one shared supervisor controller.
+- Preserved single-project response shapes, hub-only project/quota routes, authentication, dashboard prefix handling, and the 1 MiB body limit.
+- Added an architecture guard test so endpoint routing cannot drift back into both core classes; the suite is now 65 passing tests.
