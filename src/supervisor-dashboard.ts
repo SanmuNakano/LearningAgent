@@ -97,7 +97,8 @@ export function renderDashboardHtml(routePrefix: string): string {
       <div class="inline-actions">
         <button onclick="proposeInstruction()">Propose</button>
         <button onclick="tellInstruction()">Tell</button>
-        <button onclick="pauseWorker()">Pause</button>
+        <button id="pauseButton" onclick="pauseWorker()">Pause</button>
+        <button id="resumeButton" onclick="resumeWorker()">Resume</button>
       </div>
     </section>
     <section class="panel"><h2>Pending Instructions</h2><table id="instructions"></table></section>
@@ -218,8 +219,12 @@ export function renderDashboardHtml(routePrefix: string): string {
         "Goal: " + (s.worker.goal || "(not reported)"),
         "Step: " + (s.worker.currentStep || "(not reported)"),
         "Needs approval: " + (s.worker.needsUserApproval ? "yes" : "no"),
-        "Blocker: " + (s.worker.blocker || "(none)")
+        "Blocker: " + (s.worker.blocker || "(none)"),
+        "Control: " + (data.control ? data.control.mode : "active")
       ].join("\\n");
+      const controlMode = data.control ? data.control.mode : "active";
+      document.getElementById("pauseButton").disabled = controlMode !== "active";
+      document.getElementById("resumeButton").disabled = controlMode !== "paused";
       document.getElementById("nextActions").textContent = data.nextActions.length ? data.nextActions.map(a => "- [" + a.priority + "] " + a.title + ": " + a.detail + (a.command ? " (" + a.command + ")" : "")).join("\\n") : "- none";
       document.getElementById("instructions").innerHTML = pendingRows((data.pendingInstructions || []).slice(-12).reverse());
       document.getElementById("instructionExecution").innerHTML = instructionExecutionRows((data.recentInstructions || []).filter(x => x.status === "dispatched").slice(0, 12));
@@ -281,7 +286,11 @@ export function renderDashboardHtml(routePrefix: string): string {
       await refresh(true);
     }
     async function pauseWorker() {
-      await api("/api/tell", { method: "POST", body: JSON.stringify({ instruction: "Pause current work, do not make further edits, and report current status and blockers." }) });
+      await api("/api/pause", { method: "POST", body: "{}" });
+      await refresh(true);
+    }
+    async function resumeWorker() {
+      await api("/api/resume", { method: "POST", body: "{}" });
       await refresh(true);
     }
     async function registerAccount() {

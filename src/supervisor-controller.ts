@@ -96,7 +96,7 @@ export async function handleSupervisorHttp(
     return true;
   }
   if (req.method === "GET" && parsed.pathname === "/api/worker") {
-    json(res, 200, { worker: await supervisor.getWorkerState() });
+    json(res, 200, { worker: await supervisor.getWorkerState(), control: await supervisor.getControlState() });
     return true;
   }
   if (req.method === "POST" && parsed.pathname === "/api/worker-heartbeat") {
@@ -308,6 +308,14 @@ export async function handleSupervisorHttp(
     const body = await readBodyJson(req);
     const instruction = isRecord(body) && typeof body.instruction === "string" ? body.instruction : "";
     json(res, 200, { instruction: await supervisor.createInstruction({ instruction, createdBy: "human", source: "http", approve: true }) });
+    return true;
+  }
+  if (req.method === "POST" && parsed.pathname === "/api/pause") {
+    json(res, 200, { instruction: await supervisor.pauseWorker("human"), control: await supervisor.getControlState() });
+    return true;
+  }
+  if (req.method === "POST" && parsed.pathname === "/api/resume") {
+    json(res, 200, { instruction: await supervisor.resumeWorker("human"), control: await supervisor.getControlState() });
     return true;
   }
   if (req.method === "POST" && parsed.pathname === "/api/approve") {

@@ -10,6 +10,7 @@ import type {
   SupervisorNotificationStatus,
   SupervisorState,
   WorkerHeartbeatUpdate,
+  WorkerControlState,
   WorkerInboxInstruction,
   WorkerInstructionEvent,
   WorkerInstructionStatus,
@@ -82,8 +83,12 @@ function parseInstructionEvent(raw: unknown): WorkerInstructionEvent | undefined
   };
 }
 
+function getControlState(state: SupervisorState): WorkerControlState {
+  return state.control ?? { mode: "active" };
+}
+
 export class WorkerService {
-  constructor(private readonly cfg: NormalizedSupervisorConfig, private readonly dependencies: Pick<ServiceDependencies, "audit">) {}
+  constructor(private readonly cfg: NormalizedSupervisorConfig, private readonly dependencies: ServiceDependencies) {}
 
   private fallback(source: WorkerStateSource, error?: string): WorkerState {
     return { projectId: this.cfg.projectId, workerId: this.cfg.defaultWorkerId, status: "unknown", source, plan: [], needsUserApproval: false, updatedAt: nowIso(), error };
@@ -186,6 +191,21 @@ export class WorkerService {
     if (!instruction) throw new Error(`Instruction "${instructionId}" was not found in the worker inbox.`);
     const event: WorkerInstructionEvent = { instructionId, projectId: instruction.projectId, workerId: params.workerId?.trim() || instruction.targetWorker || this.cfg.defaultWorkerId, status: params.status, message: params.message?.trim() || undefined, at: nowIso() };
     await appendJsonLine(this.cfg.workerOutboxFile, event);
+    const state = await this.dependencies.readState();
+    const storedInstruction = state.instructions.find((entry) => entry.id === instructionId);
+    const control = getControlState(state);
+    if (storedInstruction?.kind === "pause" && control.mode === "pause_requested" && control.instructionId === instructionId && (params.status === "completed" || params.status === "failed" || params.status === "ignored")) {
+      state.control = params.status === "completed"
+        ? { mode: "paused", instructionId, requestedAt: control.requestedAt, changedAt: event.at, requestedBy: control.requestedBy }
+        : { mode: "active", changedAt: event.at };
+      await this.dependencies.writeState(state);
+    }
+    if (storedInstruction?.kind === "resume" && control.mode === "resume_requested" && control.instructionId === instructionId && (params.status === "completed" || params.status === "failed" || params.status === "ignored")) {
+      state.control = params.status === "completed"
+        ? { mode: "active", changedAt: event.at }
+        : { mode: "paused", instructionId, requestedAt: control.requestedAt, changedAt: event.at, requestedBy: control.requestedBy };
+      await this.dependencies.writeState(state);
+    }
     await this.dependencies.audit("worker_instruction_acknowledged", event);
     return event;
   }
@@ -200,7 +220,7 @@ export class InstructionService {
     return status ? instructions.filter((instruction) => instruction.status === status) : instructions;
   }
 
-  async create(params: { instruction: string; createdBy?: "human" | "supervisor"; source?: "mobile" | "http" | "system"; targetWorker?: string; approve?: boolean }): Promise<SupervisorInstruction> {
+  async create(params: { instruction: string; createdBy?: "human" | "supervisor"; source?: "mobile" | "http" | "system"; targetWorker?: string; approve?: boolean; kind?: "work" | "pause" | "resume" }): Promise<SupervisorInstruction> {
     const text = params.instruction.trim();
     if (!text) throw new Error("Instruction cannot be empty.");
     const createdAt = nowIso();
@@ -209,9 +229,12 @@ export class InstructionService {
       id: toId(`${this.cfg.projectId}:${createdAt}:${Math.random()}`), projectId: this.cfg.projectId,
       targetWorker: params.targetWorker?.trim() || (worker?.source === "file" ? worker.workerId : this.cfg.defaultWorkerId),
       createdBy: params.createdBy ?? "human", status: params.approve ? "approved" : "pending", instruction: text,
-      source: params.source ?? "mobile", createdAt, approvedAt: params.approve ? createdAt : undefined
+      source: params.source ?? "mobile", kind: params.kind ?? "work", createdAt, approvedAt: params.approve ? createdAt : undefined
     };
     const state = await this.dependencies.readState();
+    if (params.approve && instruction.kind === "work" && getControlState(state).mode !== "active") {
+      throw new Error(`Worker instruction dispatch is blocked while control mode is ${getControlState(state).mode}.`);
+    }
     state.instructions = [...state.instructions, instruction].slice(-this.cfg.maxInstructions);
     await this.dependencies.writeState(state);
     await this.dependencies.audit("instruction_created", instruction);
@@ -227,6 +250,9 @@ export class InstructionService {
     if (!instruction) throw new Error(`Instruction "${id}" was not found.`);
     if (instruction.status === "rejected") throw new Error(`Instruction "${id}" was already rejected.`);
     if (instruction.status === "dispatched") return instruction;
+    if ((instruction.kind ?? "work") === "work" && getControlState(state).mode !== "active") {
+      throw new Error(`Worker instruction dispatch is blocked while control mode is ${getControlState(state).mode}.`);
+    }
     instruction.status = "approved"; instruction.approvedAt ??= nowIso();
     await this.dependencies.writeState(state); await this.dependencies.audit("instruction_approved", instruction);
     return await this.dispatch(id);
@@ -248,10 +274,62 @@ export class InstructionService {
     if (!instruction) throw new Error(`Instruction "${id}" was not found.`);
     if (instruction.status === "dispatched") return instruction;
     if (instruction.status !== "approved") throw new Error(`Instruction "${id}" is not approved.`);
+    const control = getControlState(state);
+    const kind = instruction.kind ?? "work";
+    if (kind === "work" && control.mode !== "active") throw new Error(`Worker instruction dispatch is blocked while control mode is ${control.mode}.`);
+    if (kind === "pause" && control.mode !== "active") throw new Error(`Worker pause cannot be requested while control mode is ${control.mode}.`);
+    if (kind === "resume" && control.mode !== "paused") throw new Error(`Worker resume cannot be requested while control mode is ${control.mode}.`);
     instruction.status = "dispatched"; instruction.dispatchedAt = nowIso();
+    if (kind === "pause" || kind === "resume") {
+      state.control = {
+        mode: kind === "pause" ? "pause_requested" : "resume_requested",
+        instructionId: instruction.id,
+        requestedAt: instruction.dispatchedAt,
+        changedAt: instruction.dispatchedAt,
+        requestedBy: instruction.createdBy
+      };
+    }
     await appendJsonLine(this.cfg.workerInboxFile, { id: instruction.id, projectId: instruction.projectId, targetWorker: instruction.targetWorker, instruction: instruction.instruction, createdAt: instruction.createdAt, approvedAt: instruction.approvedAt, dispatchedAt: instruction.dispatchedAt });
     await this.dependencies.writeState(state); await this.dependencies.audit("instruction_dispatched", instruction);
     return instruction;
+  }
+
+  async getControl(): Promise<WorkerControlState> {
+    return getControlState(await this.dependencies.readState());
+  }
+
+  async pause(requestedBy = "human"): Promise<SupervisorInstruction> {
+    const state = await this.dependencies.readState();
+    const control = getControlState(state);
+    if (control.mode === "pause_requested" || control.mode === "paused") {
+      const existing = state.instructions.find((entry) => entry.id === control.instructionId);
+      if (existing) return existing;
+    }
+    if (control.mode !== "active") throw new Error(`Worker pause cannot be requested while control mode is ${control.mode}.`);
+    return await this.create({
+      instruction: "Pause current work safely, do not make further edits, and report current status and blockers.",
+      createdBy: requestedBy === "supervisor" ? "supervisor" : "human",
+      source: "system",
+      approve: true,
+      kind: "pause"
+    });
+  }
+
+  async resume(requestedBy = "human"): Promise<SupervisorInstruction> {
+    const state = await this.dependencies.readState();
+    const control = getControlState(state);
+    if (control.mode === "resume_requested") {
+      const existing = state.instructions.find((entry) => entry.id === control.instructionId);
+      if (existing) return existing;
+    }
+    if (control.mode !== "paused") throw new Error(`Worker resume cannot be requested while control mode is ${control.mode}.`);
+    return await this.create({
+      instruction: "Resume work from the last reported safe state and continue with the approved plan.",
+      createdBy: requestedBy === "supervisor" ? "supervisor" : "human",
+      source: "system",
+      approve: true,
+      kind: "resume"
+    });
   }
 }
 

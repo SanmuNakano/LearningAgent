@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { SupervisorState } from "./supervisor-types.js";
+import type { SupervisorState, WorkerControlState } from "./supervisor-types.js";
 
 export interface SupervisorStateStorage {
   read(): Promise<SupervisorState>;
@@ -9,7 +9,20 @@ export interface SupervisorStateStorage {
 }
 
 export function emptySupervisorState(): SupervisorState {
-  return { snapshots: [], tasks: [], instructions: [], notifications: [] };
+  return { snapshots: [], tasks: [], instructions: [], notifications: [], control: { mode: "active" } };
+}
+
+function normalizeControlState(value: unknown): WorkerControlState {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return { mode: "active" };
+  const control = value as Record<string, unknown>;
+  const mode = control.mode === "pause_requested" || control.mode === "paused" || control.mode === "resume_requested" ? control.mode : "active";
+  return {
+    mode,
+    instructionId: typeof control.instructionId === "string" ? control.instructionId : undefined,
+    requestedAt: typeof control.requestedAt === "string" ? control.requestedAt : undefined,
+    changedAt: typeof control.changedAt === "string" ? control.changedAt : undefined,
+    requestedBy: typeof control.requestedBy === "string" ? control.requestedBy : undefined
+  };
 }
 
 export function normalizeSupervisorState(raw: unknown): SupervisorState {
@@ -20,7 +33,8 @@ export function normalizeSupervisorState(raw: unknown): SupervisorState {
     snapshots: Array.isArray(value.snapshots) ? value.snapshots as SupervisorState["snapshots"] : [],
     tasks: Array.isArray(value.tasks) ? value.tasks as SupervisorState["tasks"] : [],
     instructions: Array.isArray(value.instructions) ? value.instructions as SupervisorState["instructions"] : [],
-    notifications: Array.isArray(value.notifications) ? value.notifications as SupervisorState["notifications"] : []
+    notifications: Array.isArray(value.notifications) ? value.notifications as SupervisorState["notifications"] : [],
+    control: normalizeControlState(value.control)
   };
 }
 

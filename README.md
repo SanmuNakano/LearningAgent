@@ -28,6 +28,7 @@ What it monitors:
 - structured supervision signals such as stale worker progress, repeated command failures, pending human decisions, local changes ready for review, and git ahead/behind state
 - approved-instruction compliance tracking for acknowledgement timeout, stalled execution, failure, and explicit ignore events
 - deterministic Git diff-stat and failure-log review with fix/review/commit readiness recommendations
+- optional automatic webhook delivery for actionable notifications, with timeout handling and bounded retry backoff
 
 Safe controls:
 
@@ -67,10 +68,13 @@ OpenClaw commands:
 /supervise reject <instruction-id>
 /supervise tell <instruction>
 /supervise pause
+/supervise resume
 /supervise url
 /supervise run build
 /supervise run test
 ```
+
+Pause and resume use an acknowledged control handshake. A pause request enters `pause_requested`; normal worker instructions are blocked until the worker reports the pause instruction `completed`. Resume follows the same pattern through `resume_requested`. Failed or ignored resume requests leave the worker safely paused.
 
 Standalone local dashboard:
 
@@ -108,6 +112,10 @@ Example plugin config:
     "staleAfterMs": 14400000,
     "instructionAckTimeoutMs": 900000,
     "instructionProgressTimeoutMs": 7200000,
+    "notificationWebhookUrl": "https://alerts.example.com/project-supervisor",
+    "notificationWebhookBearerToken": "replace-with-a-secret",
+    "notificationDeliveryIntervalMs": 60000,
+    "notificationDeliveryTimeoutMs": 10000,
     "watchedPorts": [3000, 5173],
     "logFiles": ["logs/app.log"],
     "allowedCommands": {
@@ -118,6 +126,8 @@ Example plugin config:
   }
 }
 ```
+
+When `notificationWebhookUrl` is configured, the OpenClaw service automatically sends open notification-outbox items as a versioned JSON payload. Delivery failures are retained for retry with exponential backoff. The bearer token is sent only in the `Authorization` header and is never included in the payload or delivery error text.
 
 ## Routing Strategy (v0.3.0)
 

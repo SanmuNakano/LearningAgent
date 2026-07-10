@@ -14,6 +14,8 @@ const DEFAULT_MAX_NOTIFICATIONS = 200;
 const DEFAULT_MAX_TASK_LOG_CHARS = 80_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_NOTIFICATION_COOLDOWN_MS = 30 * 60_000;
+const DEFAULT_NOTIFICATION_DELIVERY_INTERVAL_MS = 60_000;
+const DEFAULT_NOTIFICATION_DELIVERY_TIMEOUT_MS = 10_000;
 const DEFAULT_COMMANDS: Record<string, string> = {
   build: "npm run build",
   test: "npm test",
@@ -73,6 +75,10 @@ export function normalizeSupervisorConfig(input: SupervisorConfig = {}): Require
     maxTaskLogChars: parsePositiveInt(input.maxTaskLogChars, DEFAULT_MAX_TASK_LOG_CHARS),
     commandTimeoutMs: parsePositiveInt(input.commandTimeoutMs, DEFAULT_COMMAND_TIMEOUT_MS),
     notificationCooldownMs: parsePositiveInt(input.notificationCooldownMs, DEFAULT_NOTIFICATION_COOLDOWN_MS),
+    notificationWebhookUrl: input.notificationWebhookUrl?.trim() ?? "",
+    notificationWebhookBearerToken: input.notificationWebhookBearerToken ?? "",
+    notificationDeliveryIntervalMs: parsePositiveInt(input.notificationDeliveryIntervalMs, DEFAULT_NOTIFICATION_DELIVERY_INTERVAL_MS),
+    notificationDeliveryTimeoutMs: parsePositiveInt(input.notificationDeliveryTimeoutMs, DEFAULT_NOTIFICATION_DELIVERY_TIMEOUT_MS),
     watchedPorts: Array.isArray(input.watchedPorts) ? input.watchedPorts.filter((p) => Number.isInteger(p) && p > 0 && p < 65536) : [],
     logFiles: Array.isArray(input.logFiles) ? input.logFiles.filter((p) => typeof p === "string" && p.trim()).slice(0, 8) : [],
     ignoreDirs: Array.isArray(input.ignoreDirs) ? input.ignoreDirs.filter((p) => typeof p === "string" && p.trim()) : [],

@@ -6,6 +6,7 @@ export type WorkerStatus = "unknown" | "working" | "waiting" | "idle" | "stuck" 
 export type WorkerStateSource = "file" | "missing" | "invalid";
 export type InstructionStatus = "pending" | "approved" | "rejected" | "dispatched";
 export type WorkerInstructionStatus = "received" | "started" | "completed" | "failed" | "ignored";
+export type WorkerControlMode = "active" | "pause_requested" | "paused" | "resume_requested";
 
 export type SupervisorCommand = {
   title: string;
@@ -39,6 +40,10 @@ export type SupervisorConfig = {
   maxTaskLogChars?: number;
   commandTimeoutMs?: number;
   notificationCooldownMs?: number;
+  notificationWebhookUrl?: string;
+  notificationWebhookBearerToken?: string;
+  notificationDeliveryIntervalMs?: number;
+  notificationDeliveryTimeoutMs?: number;
   maxNotifications?: number;
   watchedPorts?: number[];
   logFiles?: string[];
@@ -138,6 +143,7 @@ export type SupervisorInstruction = {
   status: InstructionStatus;
   instruction: string;
   source: "mobile" | "http" | "system";
+  kind?: "work" | "pause" | "resume";
   createdAt: string;
   approvedAt?: string;
   rejectedAt?: string;
@@ -146,6 +152,14 @@ export type SupervisorInstruction = {
   workerStatus?: WorkerInstructionStatus;
   workerMessage?: string;
   workerUpdatedAt?: string;
+};
+
+export type WorkerControlState = {
+  mode: WorkerControlMode;
+  instructionId?: string;
+  requestedAt?: string;
+  changedAt?: string;
+  requestedBy?: string;
 };
 
 export type WorkerInstructionEvent = {
@@ -257,6 +271,7 @@ export type SupervisorState = {
   tasks: TaskRecord[];
   instructions: SupervisorInstruction[];
   notifications: SupervisorNotification[];
+  control?: WorkerControlState;
 };
 
 export type SupervisorOverview = {
@@ -269,6 +284,7 @@ export type SupervisorOverview = {
   nextActions: SupervisorNextAction[];
   signals: SupervisionSignal[];
   notifications: SupervisorNotification[];
+  control: WorkerControlState;
   accounts: CodexAccount[];
   quotaWindows: QuotaWindow[];
   quotaLogSources: QuotaLogSource[];

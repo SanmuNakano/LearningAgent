@@ -4,6 +4,8 @@ import {
   type SupervisorCommand,
   type SupervisorConfig
 } from "./supervisor.js";
+import { NotificationDeliveryWorker, WebhookNotificationDeliveryAdapter } from "./notification-delivery.js";
+import { stripUrlToken } from "./supervisor-http.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -46,6 +48,10 @@ function configFromPluginApi(api: any): SupervisorConfig {
     maxTaskLogChars: typeof raw.maxTaskLogChars === "number" ? raw.maxTaskLogChars : undefined,
     commandTimeoutMs: typeof raw.commandTimeoutMs === "number" ? raw.commandTimeoutMs : undefined,
     notificationCooldownMs: typeof raw.notificationCooldownMs === "number" ? raw.notificationCooldownMs : undefined,
+    notificationWebhookUrl: typeof raw.notificationWebhookUrl === "string" ? raw.notificationWebhookUrl : undefined,
+    notificationWebhookBearerToken: typeof raw.notificationWebhookBearerToken === "string" ? raw.notificationWebhookBearerToken : undefined,
+    notificationDeliveryIntervalMs: typeof raw.notificationDeliveryIntervalMs === "number" ? raw.notificationDeliveryIntervalMs : undefined,
+    notificationDeliveryTimeoutMs: typeof raw.notificationDeliveryTimeoutMs === "number" ? raw.notificationDeliveryTimeoutMs : undefined,
     watchedPorts: Array.isArray(raw.watchedPorts) ? raw.watchedPorts as number[] : undefined,
     logFiles: Array.isArray(raw.logFiles) ? raw.logFiles as string[] : undefined,
     ignoreDirs: Array.isArray(raw.ignoreDirs) ? raw.ignoreDirs as string[] : undefined,
@@ -60,15 +66,39 @@ export function getProjectSupervisorForTests(): ProjectSupervisorHub | null {
 }
 
 export function registerProjectSupervisor(api: any): void {
-  const supervisor = new ProjectSupervisorHub(configFromPluginApi(api), api.logger ?? {});
+  const config = configFromPluginApi(api);
+  const supervisor = new ProjectSupervisorHub(config, api.logger ?? {});
+  let notificationDelivery: NotificationDeliveryWorker | null = null;
   singleton = supervisor;
 
   api.registerService?.({
     id: "project-supervisor-service",
     start: async () => {
       await supervisor.ensureStarted();
+      if (config.notificationWebhookUrl) {
+        try {
+          notificationDelivery = new NotificationDeliveryWorker(
+            supervisor,
+            new WebhookNotificationDeliveryAdapter({
+              url: config.notificationWebhookUrl,
+              bearerToken: config.notificationWebhookBearerToken,
+              timeoutMs: config.notificationDeliveryTimeoutMs,
+              panelUrl: stripUrlToken(supervisor.getPanelUrl())
+            }),
+            config.notificationDeliveryIntervalMs,
+            Date.now,
+            (error) => api.logger?.warn?.(`project-supervisor notification delivery pass failed: ${error instanceof Error ? error.message : String(error)}`)
+          );
+          notificationDelivery.start();
+        } catch (error) {
+          notificationDelivery = null;
+          api.logger?.error?.(`project-supervisor notification delivery disabled: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
     },
     stop: async () => {
+      notificationDelivery?.stop();
+      notificationDelivery = null;
       await supervisor.stop();
     }
   });
@@ -76,6 +106,8 @@ export function registerProjectSupervisor(api: any): void {
   api.lifecycle?.registerRuntimeLifecycle?.({
     id: "project-supervisor-cleanup",
     cleanup: async () => {
+      notificationDelivery?.stop();
+      notificationDelivery = null;
       await supervisor.stop();
     }
   });
@@ -269,13 +301,12 @@ export function registerProjectSupervisor(api: any): void {
         return { text: `Dispatched instruction ${instruction.id} to ${instruction.targetWorker}.` };
       }
       if (/^pause$/i.test(args)) {
-        const instruction = await supervisor.createInstruction({
-          instruction: "Pause current work, do not make further edits, and report current status and blockers.",
-          createdBy: "human",
-          source: "mobile",
-          approve: true
-        });
-        return { text: `Dispatched pause instruction ${instruction.id} to ${instruction.targetWorker}.` };
+        const instruction = await supervisor.pauseWorker("human");
+        return { text: `Pause requested with instruction ${instruction.id}. Waiting for worker acknowledgement.` };
+      }
+      if (/^resume$/i.test(args)) {
+        const instruction = await supervisor.resumeWorker("human");
+        return { text: `Resume requested with instruction ${instruction.id}. Waiting for worker acknowledgement.` };
       }
       if (/^approve\s+latest$/i.test(args)) {
         const instruction = await supervisor.approveLatestPendingInstruction();
@@ -332,6 +363,7 @@ export function registerProjectSupervisor(api: any): void {
           "/supervise reject <instruction-id>",
           "/supervise tell <instruction>",
           "/supervise pause",
+          "/supervise resume",
           "/supervise url",
           "/supervise run build",
           "/supervise run test",

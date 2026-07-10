@@ -180,6 +180,24 @@
             "description": "Delay before an acknowledged or resolved signal may reopen a notification",
             "default": 1800000
           },
+          "notificationWebhookUrl": {
+            "type": "string",
+            "description": "Optional HTTP(S) webhook that receives open supervisor notifications"
+          },
+          "notificationWebhookBearerToken": {
+            "type": "string",
+            "description": "Optional bearer token sent only in the notification webhook Authorization header"
+          },
+          "notificationDeliveryIntervalMs": {
+            "type": "number",
+            "description": "Notification outbox polling and base retry interval in milliseconds",
+            "default": 60000
+          },
+          "notificationDeliveryTimeoutMs": {
+            "type": "number",
+            "description": "Notification webhook request timeout in milliseconds",
+            "default": 10000
+          },
           "watchedPorts": {
             "type": "array",
             "description": "Local ports expected to be open while the project is running",

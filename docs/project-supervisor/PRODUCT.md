@@ -281,5 +281,5 @@ Required:
 - Should state live inside each project, or in one central supervisor home directory?
 - What is the first worker AI adapter: file-based, OpenClaw runtime, or Codex thread integration?
 - Should mobile approval be required for all instructions or only risky ones?
-- How should the supervisor pause/resume a worker AI safely?
+- Pause/resume uses a persisted four-state control handshake and requires worker completion acknowledgement before changing the effective state. Implemented in Phase 17.
 - How much project history should be retained?

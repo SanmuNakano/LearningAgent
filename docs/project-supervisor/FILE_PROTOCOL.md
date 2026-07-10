@@ -201,7 +201,8 @@ The OpenClaw command surface maps to the protocol:
 - `/supervise reject latest` rejects the newest pending instruction.
 - `/supervise reject <id>` rejects a pending instruction.
 - `/supervise tell <instruction>` immediately dispatches a human-approved instruction.
-- `/supervise pause` asks the worker AI to stop editing and report current status.
+- `/supervise pause` dispatches a typed pause request and blocks normal worker instruction dispatch.
+- `/supervise resume` dispatches a typed resume request after the worker has confirmed it is paused.
 - `/supervise pending` lists recent supervisor instructions.
 
 ## HTTP API
@@ -218,7 +219,19 @@ The dashboard and phone gateway use the same active project routing:
 - `POST /api/activate-project` with `{ "id": "project-id" }` switches the active project.
 - `POST /api/approve-latest` approves the newest pending instruction for the active project.
 - `POST /api/reject-latest` rejects the newest pending instruction for the active project.
+- `POST /api/pause` and `POST /api/resume` start the acknowledged worker control handshake.
 - `GET /api/status`, `POST /api/scan`, `GET /api/worker`, `GET /api/instructions`, `POST /api/run`, `POST /api/propose`, `POST /api/tell`, `POST /api/approve`, and `POST /api/reject` operate on the active project.
+
+## Worker Pause And Resume Control
+
+The per-project supervisor state stores one control mode:
+
+- `active`: normal worker instructions may be approved and dispatched.
+- `pause_requested`: a typed pause instruction was dispatched; normal dispatch is blocked while acknowledgement is pending.
+- `paused`: the worker reported the pause instruction `completed`; normal dispatch remains blocked.
+- `resume_requested`: a typed resume instruction was dispatched; normal dispatch remains blocked until completion.
+
+Pause and resume are idempotent while the matching state is already active. A failed or ignored pause returns control to `active`. A failed or ignored resume returns control to `paused`. This prevents the supervisor from claiming the worker stopped or resumed before the worker explicitly confirms it.
 
 ## Supervision Signals
 
@@ -289,6 +302,19 @@ An external OpenClaw/QQ adapter can poll open notifications that have not been d
 - `--mark-notification-delivery <id-or-signal-id> <delivered|failed>` records the adapter result.
 
 A delivered notification remains delivered across periodic scans. It is queued again only when the signal changes materially or an acknowledged/resolved notification is reopened after cooldown.
+
+### Automatic Webhook Delivery
+
+When `notificationWebhookUrl` is configured, the OpenClaw service polls the notification delivery outbox and sends up to ten eligible items per pass. The webhook must use HTTP or HTTPS and must not contain URL credentials.
+
+The JSON payload uses `version: 1` and `event: "project-supervisor.notification"`. It contains a human-readable text summary, a token-free panel URL, and only the notification fields needed by a downstream mobile or chat adapter. Supervisor state, worker messages, delivery errors, and the optional bearer token are not copied into the payload.
+
+Successful requests mark the item `delivered`. Failed requests retain a sanitized error and retry with exponential backoff capped at 30 minutes. Configuration controls the polling interval and per-request timeout:
+
+- `notificationWebhookUrl`
+- `notificationWebhookBearerToken`
+- `notificationDeliveryIntervalMs`
+- `notificationDeliveryTimeoutMs`
 
 ## Dashboard Authentication
 

@@ -603,6 +603,47 @@ describe("ProjectSupervisor", () => {
     }
   });
 
+  it("pauses and resumes worker dispatch through acknowledged control instructions", async () => {
+    const projectDir = await makeProject();
+    try {
+      const supervisorDir = join(projectDir, ".project-supervisor");
+      const supervisor = new ProjectSupervisor({
+        projectId: "test-project",
+        projectDir,
+        stateFile: join(supervisorDir, "state.json"),
+        workerInboxFile: join(supervisorDir, "inbox.jsonl"),
+        workerOutboxFile: join(supervisorDir, "outbox.jsonl"),
+        auditFile: join(supervisorDir, "audit.jsonl"),
+        autoStartServer: false
+      });
+
+      const pause = await supervisor.pauseWorker();
+      expect(pause.kind).toBe("pause");
+      expect((await supervisor.getControlState()).mode).toBe("pause_requested");
+      await expect(supervisor.createInstruction({ instruction: "Keep editing.", approve: true })).rejects.toThrow(/dispatch is blocked/);
+
+      await supervisor.acknowledgeWorkerInstruction({ instructionId: pause.id, status: "completed", message: "Stopped safely." });
+      expect((await supervisor.getControlState()).mode).toBe("paused");
+      expect((await supervisor.pauseWorker()).id).toBe(pause.id);
+      await supervisor.acknowledgeWorkerInstruction({ instructionId: pause.id, status: "failed", message: "Late duplicate." });
+      expect((await supervisor.getControlState()).mode).toBe("paused");
+
+      const failedResume = await supervisor.resumeWorker();
+      expect((await supervisor.getControlState()).mode).toBe("resume_requested");
+      await supervisor.acknowledgeWorkerInstruction({ instructionId: failedResume.id, status: "failed", message: "Cannot resume." });
+      expect((await supervisor.getControlState()).mode).toBe("paused");
+
+      const resume = await supervisor.resumeWorker();
+      await supervisor.acknowledgeWorkerInstruction({ instructionId: failedResume.id, status: "completed", message: "Late stale completion." });
+      expect((await supervisor.getControlState()).mode).toBe("resume_requested");
+      await supervisor.acknowledgeWorkerInstruction({ instructionId: resume.id, status: "completed", message: "Work resumed." });
+      expect((await supervisor.getControlState()).mode).toBe("active");
+      expect((await supervisor.createInstruction({ instruction: "Continue the plan.", approve: true })).status).toBe("dispatched");
+    } finally {
+      await removeProject(projectDir);
+    }
+  });
+
   it("builds an operator overview and approves or rejects the latest pending instruction", async () => {
     const projectDir = await makeProject();
     try {

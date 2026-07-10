@@ -119,3 +119,21 @@
 - Added review summaries and recommendations to text status, mobile `/supervise review`, and the dashboard.
 - Fixed first-entry Git porcelain parsing so an unstaged change cannot be misclassified as staged when leading whitespace is significant.
 - Verified Phase 15 with `npm run check`; the suite is now 78 passing tests.
+
+## 2026-07-10 - Phase 16
+
+- Added optional automatic delivery of open supervisor notifications to an HTTP(S) webhook.
+- Added a versioned privacy-limited payload, optional bearer authentication, token-free panel links, and request timeouts.
+- Added delivery lifecycle integration with bounded batches, overlap prevention, sanitized errors, and exponential retry backoff capped at 30 minutes.
+- Added plugin configuration schema and operator/file-protocol documentation for webhook delivery.
+- Verified Phase 16 with `npm run check`; the suite is now 81 passing tests.
+
+## 2026-07-10 - Phase 17
+
+- Added persisted worker control modes: `active`, `pause_requested`, `paused`, and `resume_requested`.
+- Replaced the previous plain-text pause action with typed, idempotent pause/resume instructions and worker acknowledgement transitions.
+- Blocked ordinary worker instruction approval and dispatch whenever the worker control mode is not active.
+- Added safe rollback behavior: failed/ignored pause returns to active, while failed/ignored resume remains paused.
+- Guarded state transitions by current control mode and instruction ID so late acknowledgements cannot overwrite a newer request.
+- Added `/supervise resume`, `POST /api/pause`, `POST /api/resume`, overview/control status, and dashboard controls.
+- Verified Phase 17 with `npm run check`; the suite is now 82 passing tests.

@@ -68,6 +68,7 @@ import type {
   TaskRecord,
   TaskStatus,
   WorkerHeartbeatUpdate,
+  WorkerControlState,
   WorkerInboxInstruction,
   WorkerInstructionEvent,
   WorkerInstructionStatus,
@@ -98,6 +99,7 @@ export type {
   TaskRecord,
   TaskStatus,
   WorkerHeartbeatUpdate,
+  WorkerControlState,
   WorkerInboxInstruction,
   WorkerInstructionEvent,
   WorkerInstructionStatus,
@@ -248,6 +250,10 @@ function configForRegistryEntry(
     maxTaskLogChars: base.maxTaskLogChars,
     commandTimeoutMs: base.commandTimeoutMs,
     notificationCooldownMs: base.notificationCooldownMs,
+    notificationWebhookUrl: base.notificationWebhookUrl,
+    notificationWebhookBearerToken: base.notificationWebhookBearerToken,
+    notificationDeliveryIntervalMs: base.notificationDeliveryIntervalMs,
+    notificationDeliveryTimeoutMs: base.notificationDeliveryTimeoutMs,
     watchedPorts: [...base.watchedPorts],
     logFiles: [...base.logFiles],
     ignoreDirs: [...base.ignoreDirs],
@@ -534,6 +540,7 @@ export class ProjectSupervisor {
       nextActions: snapshot.nextActions,
       signals: snapshot.signals ?? [],
       notifications: notifications.slice(-10).reverse(),
+      control: await this.getControlState(),
       accounts: [],
       quotaWindows: [],
       quotaLogSources: [],
@@ -548,6 +555,7 @@ export class ProjectSupervisor {
     source?: "mobile" | "http" | "system";
     targetWorker?: string;
     approve?: boolean;
+    kind?: "work" | "pause" | "resume";
   }): Promise<SupervisorInstruction> {
     return await this.instructionService.create(params);
   }
@@ -570,6 +578,18 @@ export class ProjectSupervisor {
 
   async dispatchInstruction(id: string): Promise<SupervisorInstruction> {
     return await this.instructionService.dispatch(id);
+  }
+
+  async getControlState(): Promise<WorkerControlState> {
+    return await this.instructionService.getControl();
+  }
+
+  async pauseWorker(requestedBy = "human"): Promise<SupervisorInstruction> {
+    return await this.instructionService.pause(requestedBy);
+  }
+
+  async resumeWorker(requestedBy = "human"): Promise<SupervisorInstruction> {
+    return await this.instructionService.resume(requestedBy);
   }
 
   async runAllowedCommand(name: string): Promise<TaskRecord> {
@@ -634,6 +654,7 @@ export class ProjectSupervisor {
 
   async renderTextStatus(forceScan = false): Promise<string> {
     const snapshot = forceScan ? await this.scan() : await this.latest();
+    const control = await this.getControlState();
     const notifications = await this.listNotifications("open");
     const git = snapshot.git.available
       ? `branch ${snapshot.git.branch ?? "(unknown)"}, ${snapshot.git.changedFiles ?? 0} changed, ahead ${snapshot.git.aheadBy ?? 0}, behind ${snapshot.git.behindBy ?? 0}`
@@ -656,6 +677,7 @@ export class ProjectSupervisor {
       `Git: ${git}`,
       `Review: ${snapshot.review?.readiness ?? "unavailable"} - ${snapshot.review?.recommendation ?? "refresh scan"}`,
       `Worker: ${worker}`,
+      `Worker control: ${control.mode}${control.instructionId ? ` (${control.instructionId})` : ""}`,
       `Pending instructions: ${pending.length}`,
       `Open alerts: ${notifications.length}`,
       `Recent files: ${snapshot.fileScan.recent.length}`,
@@ -1063,6 +1085,7 @@ export class ProjectSupervisorHub {
       nextActions: snapshot.nextActions,
       signals: snapshot.signals ?? [],
       notifications: notifications.slice(-10).reverse(),
+      control: await active.getControlState(),
       accounts: quotaRegistry.accounts,
       quotaWindows: quotaRegistry.windows,
       quotaLogSources: quotaRegistry.logSources,
@@ -1073,6 +1096,18 @@ export class ProjectSupervisorHub {
 
   async createInstruction(params: Parameters<ProjectSupervisor["createInstruction"]>[0]): Promise<SupervisorInstruction> {
     return await (await this.getActiveSupervisor()).createInstruction(params);
+  }
+
+  async getControlState(): Promise<WorkerControlState> {
+    return await (await this.getActiveSupervisor()).getControlState();
+  }
+
+  async pauseWorker(requestedBy = "human"): Promise<SupervisorInstruction> {
+    return await (await this.getActiveSupervisor()).pauseWorker(requestedBy);
+  }
+
+  async resumeWorker(requestedBy = "human"): Promise<SupervisorInstruction> {
+    return await (await this.getActiveSupervisor()).resumeWorker(requestedBy);
   }
 
   async approveLatestPendingInstruction(): Promise<SupervisorInstruction> {
