@@ -23,6 +23,7 @@ import {
   writeHttpError
 } from "./supervisor-http.js";
 import { handleSupervisorHttp } from "./supervisor-controller.js";
+import { InstructionService, NotificationService, WorkerService } from "./supervisor-services.js";
 import { normalizeSupervisorConfig, type NormalizedSupervisorConfig } from "./supervisor-config.js";
 export { normalizeSupervisorConfig } from "./supervisor-config.js";
 import { checkPort, readLogTails, readPackageScripts, scanFiles, scanGit } from "./project-scanner.js";
@@ -59,6 +60,7 @@ import type {
   SupervisorNotificationStatus,
   SupervisorOverview,
   SupervisorSnapshot,
+  SupervisorState,
   TaskRecord,
   TaskStatus,
   WorkerHeartbeatUpdate,
@@ -88,6 +90,7 @@ export type {
   SupervisorNotificationStatus,
   SupervisorOverview,
   SupervisorSnapshot,
+  SupervisorState,
   TaskRecord,
   TaskStatus,
   WorkerHeartbeatUpdate,
@@ -99,14 +102,6 @@ export type {
   WorkerStateSource,
   WorkerStatus
 } from "./supervisor-types.js";
-type SupervisorState = {
-  token?: string;
-  snapshots: SupervisorSnapshot[];
-  tasks: TaskRecord[];
-  instructions: SupervisorInstruction[];
-  notifications: SupervisorNotification[];
-};
-
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -148,26 +143,6 @@ async function appendJsonLine(file: string, value: unknown): Promise<void> {
   await fs.appendFile(file, `${JSON.stringify(value)}\n`, "utf-8");
 }
 
-async function readJsonLines(file: string, maxLines: number): Promise<unknown[]> {
-  try {
-    const raw = await fs.readFile(file, "utf-8");
-    const lines = raw.split(/\r?\n/).filter(Boolean).slice(-maxLines);
-    const out: unknown[] = [];
-    for (const line of lines) {
-      try {
-        out.push(JSON.parse(line));
-      } catch {
-        // Ignore malformed worker events; the heartbeat will surface broader invalid state.
-      }
-    }
-    return out;
-  } catch (error) {
-    const nodeError = error as NodeJS.ErrnoException;
-    if (nodeError.code === "ENOENT") return [];
-    throw error;
-  }
-}
-
 async function pathExists(target: string): Promise<boolean> {
   try {
     await fs.access(target);
@@ -177,153 +152,8 @@ async function pathExists(target: string): Promise<boolean> {
   }
 }
 
-function parseWorkerStatus(value: unknown): WorkerStatus {
-  if (value === "unknown" || value === "working" || value === "waiting" || value === "idle" || value === "stuck" || value === "done") {
-    return value;
-  }
-  return "unknown";
-}
-
-function parseWorkerStatusStrict(value: unknown): WorkerStatus | undefined {
-  if (value === "unknown" || value === "working" || value === "waiting" || value === "idle" || value === "stuck" || value === "done") {
-    return value;
-  }
-  return undefined;
-}
-
-function parseWorkerPlan(value: unknown): WorkerPlanItem[] {
-  if (!Array.isArray(value)) return [];
-  const out: WorkerPlanItem[] = [];
-  for (const item of value) {
-    if (!isRecord(item) || typeof item.step !== "string" || !item.step.trim()) continue;
-    const status = item.status === "in_progress" || item.status === "completed" || item.status === "blocked"
-      ? item.status
-      : "pending";
-    out.push({ step: item.step.trim(), status });
-  }
-  return out.slice(0, 20);
-}
-
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function optionalNullableString(value: unknown): string | null | undefined {
-  if (value === null) return null;
-  return optionalString(value);
-}
-
-function parseWorkerInstructionStatus(value: unknown): WorkerInstructionStatus | null {
-  if (value === "received" || value === "started" || value === "completed" || value === "failed" || value === "ignored") {
-    return value;
-  }
-  return null;
-}
-
-function fallbackWorkerState(params: {
-  projectId: string;
-  workerId: string;
-  source: WorkerStateSource;
-  error?: string;
-}): WorkerState {
-  return {
-    projectId: params.projectId,
-    workerId: params.workerId,
-    status: "unknown",
-    source: params.source,
-    plan: [],
-    needsUserApproval: false,
-    updatedAt: nowIso(),
-    error: params.error
-  };
-}
-
-async function readWorkerOutbox(file: string): Promise<WorkerInstructionEvent[]> {
-  const rawEvents = await readJsonLines(file, 500);
-  const events: WorkerInstructionEvent[] = [];
-  for (const raw of rawEvents) {
-    if (!isRecord(raw)) continue;
-    const instructionId = optionalString(raw.instructionId) ?? optionalString(raw.id);
-    const status = parseWorkerInstructionStatus(raw.status);
-    if (!instructionId || !status) continue;
-    events.push({
-      instructionId,
-      projectId: optionalString(raw.projectId),
-      workerId: optionalString(raw.workerId),
-      status,
-      message: optionalString(raw.message),
-      at: optionalString(raw.at) ?? optionalString(raw.updatedAt) ?? nowIso()
-    });
-  }
-  return events;
-}
-
-async function readWorkerInbox(file: string): Promise<WorkerInboxInstruction[]> {
-  const rawInstructions = await readJsonLines(file, 500);
-  const instructions: WorkerInboxInstruction[] = [];
-  for (const raw of rawInstructions) {
-    if (!isRecord(raw)) continue;
-    const id = optionalString(raw.id) ?? optionalString(raw.instructionId);
-    const projectId = optionalString(raw.projectId);
-    const targetWorker = optionalString(raw.targetWorker) ?? optionalString(raw.workerId);
-    const instruction = optionalString(raw.instruction);
-    const dispatchedAt = optionalString(raw.dispatchedAt);
-    if (!id || !projectId || !targetWorker || !instruction || !dispatchedAt) continue;
-    instructions.push({
-      id,
-      projectId,
-      targetWorker,
-      instruction,
-      createdAt: optionalString(raw.createdAt) ?? dispatchedAt,
-      approvedAt: optionalString(raw.approvedAt),
-      dispatchedAt
-    });
-  }
-  return instructions;
-}
-
-function mergeInboxWithWorkerEvents(instructions: WorkerInboxInstruction[], events: WorkerInstructionEvent[]): WorkerInboxInstruction[] {
-  const latestByInstruction = new Map<string, WorkerInstructionEvent>();
-  for (const event of events) {
-    const existing = latestByInstruction.get(event.instructionId);
-    if (!existing || Date.parse(event.at) >= Date.parse(existing.at)) {
-      latestByInstruction.set(event.instructionId, event);
-    }
-  }
-  return instructions.map((instruction) => {
-    const event = latestByInstruction.get(instruction.id);
-    if (!event) return instruction;
-    return {
-      ...instruction,
-      workerStatus: event.status,
-      workerMessage: event.message,
-      workerUpdatedAt: event.at
-    };
-  });
-}
-
-function isTerminalWorkerInstructionStatus(status: WorkerInstructionStatus | undefined): boolean {
-  return status === "completed" || status === "failed" || status === "ignored";
-}
-
-function applyWorkerEventsToInstructions(instructions: SupervisorInstruction[], events: WorkerInstructionEvent[]): SupervisorInstruction[] {
-  const latestByInstruction = new Map<string, WorkerInstructionEvent>();
-  for (const event of events) {
-    const existing = latestByInstruction.get(event.instructionId);
-    if (!existing || Date.parse(event.at) >= Date.parse(existing.at)) {
-      latestByInstruction.set(event.instructionId, event);
-    }
-  }
-  return instructions.map((instruction) => {
-    const event = latestByInstruction.get(instruction.id);
-    if (!event) return instruction;
-    return {
-      ...instruction,
-      workerStatus: event.status,
-      workerMessage: event.message,
-      workerUpdatedAt: event.at
-    };
-  });
 }
 
 function normalizeProjectRegistry(raw: unknown): ProjectRegistry {
@@ -365,46 +195,6 @@ async function writeProjectRegistry(file: string, registry: ProjectRegistry): Pr
     activeProjectId: registry.activeProjectId,
     projects: registry.projects.sort((a, b) => a.id.localeCompare(b.id))
   });
-}
-
-async function readWorkerState(cfg: ReturnType<typeof normalizeSupervisorConfig>): Promise<WorkerState> {
-  try {
-    const raw = await fs.readFile(cfg.workerStateFile, "utf-8");
-    const parsed: unknown = JSON.parse(raw);
-    if (!isRecord(parsed)) {
-      return fallbackWorkerState({ projectId: cfg.projectId, workerId: cfg.defaultWorkerId, source: "invalid", error: "worker state is not an object" });
-    }
-    const workerId = optionalString(parsed.workerId) ?? cfg.defaultWorkerId;
-    const projectId = optionalString(parsed.projectId) ?? cfg.projectId;
-    const lastProgressAt = optionalString(parsed.lastProgressAt);
-    const lastActivityAt = optionalString(parsed.lastActivityAt);
-    const updatedAt = optionalString(parsed.updatedAt) ?? lastActivityAt ?? lastProgressAt ?? nowIso();
-    return {
-      projectId,
-      workerId,
-      status: parseWorkerStatus(parsed.status),
-      source: "file",
-      goal: optionalString(parsed.goal),
-      currentStep: optionalString(parsed.currentStep),
-      plan: parseWorkerPlan(parsed.plan),
-      lastProgressAt,
-      lastActivityAt,
-      needsUserApproval: parsed.needsUserApproval === true,
-      blocker: optionalNullableString(parsed.blocker),
-      updatedAt
-    };
-  } catch (error) {
-    const nodeError = error as NodeJS.ErrnoException;
-    if (nodeError.code === "ENOENT") {
-      return fallbackWorkerState({ projectId: cfg.projectId, workerId: cfg.defaultWorkerId, source: "missing" });
-    }
-    return fallbackWorkerState({
-      projectId: cfg.projectId,
-      workerId: cfg.defaultWorkerId,
-      source: "invalid",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
 }
 
 function normalizeState(raw: unknown): SupervisorState {
@@ -478,11 +268,22 @@ export class ProjectSupervisor {
   private scanTimer: NodeJS.Timeout | null = null;
   private runningTasks = new Map<string, TaskRecord>();
   private token = "";
+  private readonly workerService: WorkerService;
+  private readonly instructionService: InstructionService;
+  private readonly notificationService: NotificationService;
 
   constructor(config: SupervisorConfig = {}, logger: Logger = {}) {
     this.cfg = normalizeSupervisorConfig(config);
     this.logger = logger;
     this.token = this.cfg.token;
+    const dependencies = {
+      readState: () => this.readState(),
+      writeState: (state: SupervisorState) => this.writeState(state),
+      audit: (event: string, payload: unknown) => this.audit(event, payload)
+    };
+    this.workerService = new WorkerService(this.cfg, dependencies);
+    this.instructionService = new InstructionService(this.cfg, dependencies, this.workerService);
+    this.notificationService = new NotificationService(this.cfg.projectId, dependencies);
   }
 
   getConfig(): ReturnType<typeof normalizeSupervisorConfig> {
@@ -587,17 +388,17 @@ export class ProjectSupervisor {
     const state = await this.readState();
     const tasks = [...state.tasks, ...this.runningTasks.values()].slice(-this.cfg.maxHistory);
     const [outboxEvents, registry] = await Promise.all([
-      readWorkerOutbox(this.cfg.workerOutboxFile),
+      this.workerService.readOutbox(),
       this.readProjectRegistry()
     ]);
-    const instructions = applyWorkerEventsToInstructions(state.instructions.slice(-this.cfg.maxInstructions), outboxEvents);
+    const instructions = this.workerService.applyEvents(state.instructions.slice(-this.cfg.maxInstructions), outboxEvents);
     const [fileScan, git, packageScripts, ports, logTails, worker] = await Promise.all([
       scanFiles(this.cfg.projectDir, { maxFiles: this.cfg.maxFiles, ignoreDirs: this.cfg.ignoreDirs }),
       scanGit(this.cfg.projectDir),
       readPackageScripts(this.cfg.projectDir),
       Promise.all(this.cfg.watchedPorts.map((port) => checkPort(port))),
       readLogTails(this.cfg.projectDir, this.cfg.logFiles),
-      readWorkerState(this.cfg)
+      this.workerService.getState()
     ]);
     const projectRisk = buildRisks({ git, fileScan, ports, tasks, staleAfterMs: this.cfg.staleAfterMs });
     const workerRisks = buildWorkerRisks(worker, instructions);
@@ -660,77 +461,23 @@ export class ProjectSupervisor {
   }
 
   async getWorkerState(): Promise<WorkerState> {
-    return await readWorkerState(this.cfg);
+    return await this.workerService.getState();
   }
 
   async updateWorkerHeartbeat(update: WorkerHeartbeatUpdate): Promise<WorkerState> {
-    const existing = await this.getWorkerState().catch(() => fallbackWorkerState({
-      projectId: this.cfg.projectId,
-      workerId: this.cfg.defaultWorkerId,
-      source: "missing"
-    }));
-    const now = nowIso();
-    const nextPlan = update.plan === undefined ? existing.plan : parseWorkerPlan(update.plan);
-    const nextStatus = update.status ?? existing.status;
-    const nextGoal = update.goal !== undefined ? update.goal.trim() || undefined : existing.goal;
-    const nextStep = update.currentStep !== undefined ? update.currentStep.trim() || undefined : existing.currentStep;
-    const nextBlocker = update.blocker !== undefined
-      ? typeof update.blocker === "string"
-        ? update.blocker.trim() || null
-        : update.blocker
-      : existing.blocker;
-    const progressChanged =
-      update.markProgress === true ||
-      nextStatus !== existing.status ||
-      nextGoal !== existing.goal ||
-      nextStep !== existing.currentStep ||
-      update.plan !== undefined;
-    const state = {
-      projectId: this.cfg.projectId,
-      workerId: update.workerId?.trim() || existing.workerId || this.cfg.defaultWorkerId,
-      status: nextStatus,
-      goal: nextGoal,
-      currentStep: nextStep,
-      plan: nextPlan,
-      lastProgressAt: update.lastProgressAt ?? (progressChanged ? now : existing.lastProgressAt),
-      lastActivityAt: update.lastActivityAt ?? now,
-      needsUserApproval: update.needsUserApproval ?? existing.needsUserApproval,
-      blocker: nextBlocker,
-      updatedAt: now
-    };
-    await writeJsonFile(this.cfg.workerStateFile, state);
-    await this.audit("worker_heartbeat_updated", {
-      workerId: state.workerId,
-      status: state.status,
-      goal: state.goal,
-      currentStep: state.currentStep,
-      needsUserApproval: state.needsUserApproval,
-      blocker: state.blocker
-    });
-    return await this.getWorkerState();
+    return await this.workerService.updateHeartbeat(update);
   }
 
   async listInstructions(status?: InstructionStatus): Promise<SupervisorInstruction[]> {
-    const state = await this.readState();
-    const events = await readWorkerOutbox(this.cfg.workerOutboxFile);
-    const instructions = applyWorkerEventsToInstructions(state.instructions.slice(-this.cfg.maxInstructions), events);
-    return status ? instructions.filter((instruction) => instruction.status === status) : instructions;
+    return await this.instructionService.list(status);
   }
 
   async listNotifications(status?: SupervisorNotificationStatus): Promise<SupervisorNotification[]> {
-    const state = await this.readState();
-    const notifications = state.notifications.filter((notification) => notification.projectId === this.cfg.projectId);
-    return status ? notifications.filter((notification) => notification.status === status) : notifications;
+    return await this.notificationService.list(status);
   }
 
   async listNotificationOutbox(): Promise<SupervisorNotification[]> {
-    const state = await this.readState();
-    return state.notifications
-      .filter((notification) => notification.projectId === this.cfg.projectId)
-      .filter((notification) => notification.status === "open")
-      .filter((notification) => (notification.deliveryStatus ?? "pending") !== "delivered")
-      .slice(-20)
-      .reverse();
+    return await this.notificationService.listOutbox();
   }
 
   async markNotificationDelivery(params: {
@@ -738,71 +485,19 @@ export class ProjectSupervisor {
     status: Extract<SupervisorNotificationDeliveryStatus, "delivered" | "failed">;
     error?: string;
   }): Promise<SupervisorNotification> {
-    const notificationId = params.id.trim();
-    if (!notificationId) throw new Error("Notification id is required.");
-    const state = await this.readState();
-    const notification = state.notifications.find((entry) => entry.id === notificationId || entry.signalId === notificationId);
-    if (!notification) throw new Error(`Notification "${notificationId}" was not found.`);
-    if (notification.projectId !== this.cfg.projectId) throw new Error(`Notification "${notificationId}" does not belong to this project.`);
-    const now = nowIso();
-    notification.deliveryStatus = params.status;
-    notification.lastDeliveryAt = now;
-    notification.deliveryAttempts = (notification.deliveryAttempts ?? 0) + 1;
-    notification.deliveryError = params.status === "failed" ? params.error?.trim() || "delivery failed" : undefined;
-    notification.updatedAt = now;
-    await this.writeState(state);
-    await this.audit("notification_delivery_marked", {
-      id: notification.id,
-      signalId: notification.signalId,
-      status: notification.deliveryStatus,
-      error: notification.deliveryError
-    });
-    return notification;
+    return await this.notificationService.markDelivery(params);
   }
 
   async acknowledgeNotification(id: string, acknowledgedBy = "human"): Promise<SupervisorNotification> {
-    const state = await this.readState();
-    const notification = state.notifications.find((entry) => entry.id === id || entry.signalId === id);
-    if (!notification) throw new Error(`Notification "${id}" was not found.`);
-    notification.status = "acknowledged";
-    notification.acknowledgedAt = nowIso();
-    notification.acknowledgedBy = acknowledgedBy;
-    notification.updatedAt = notification.acknowledgedAt;
-    await this.writeState(state);
-    await this.audit("notification_acknowledged", notification);
-    return notification;
+    return await this.notificationService.acknowledge(id, acknowledgedBy);
   }
 
   async acknowledgeOpenNotifications(acknowledgedBy = "human"): Promise<SupervisorNotification[]> {
-    const state = await this.readState();
-    const now = nowIso();
-    const notifications = state.notifications.filter((entry) => entry.projectId === this.cfg.projectId && entry.status === "open");
-    for (const notification of notifications) {
-      notification.status = "acknowledged";
-      notification.acknowledgedAt = now;
-      notification.acknowledgedBy = acknowledgedBy;
-      notification.updatedAt = now;
-    }
-    await this.writeState(state);
-    await this.audit("notifications_acknowledged", { count: notifications.length, acknowledgedBy, at: now });
-    return notifications;
+    return await this.notificationService.acknowledgeOpen(acknowledgedBy);
   }
 
   async listWorkerInbox(params: { workerId?: string; includeAcknowledged?: boolean } = {}): Promise<WorkerInboxInstruction[]> {
-    const [inbox, outboxEvents] = await Promise.all([
-      readWorkerInbox(this.cfg.workerInboxFile),
-      readWorkerOutbox(this.cfg.workerOutboxFile)
-    ]);
-    const workerId = params.workerId?.trim();
-    let instructions = mergeInboxWithWorkerEvents(inbox, outboxEvents)
-      .filter((instruction) => instruction.projectId === this.cfg.projectId);
-    if (workerId) {
-      instructions = instructions.filter((instruction) => instruction.targetWorker === workerId);
-    }
-    if (!params.includeAcknowledged) {
-      instructions = instructions.filter((instruction) => !isTerminalWorkerInstructionStatus(instruction.workerStatus));
-    }
-    return instructions;
+    return await this.workerService.listInbox(params);
   }
 
   async acknowledgeWorkerInstruction(params: {
@@ -811,22 +506,7 @@ export class ProjectSupervisor {
     message?: string;
     workerId?: string;
   }): Promise<WorkerInstructionEvent> {
-    const instructionId = params.instructionId.trim();
-    if (!instructionId) throw new Error("Instruction id is required.");
-    const instruction = (await this.listWorkerInbox({ includeAcknowledged: true }))
-      .find((entry) => entry.id === instructionId);
-    if (!instruction) throw new Error(`Instruction "${instructionId}" was not found in the worker inbox.`);
-    const event: WorkerInstructionEvent = {
-      instructionId,
-      projectId: instruction.projectId,
-      workerId: params.workerId?.trim() || instruction.targetWorker || this.cfg.defaultWorkerId,
-      status: params.status,
-      message: params.message?.trim() || undefined,
-      at: nowIso()
-    };
-    await appendJsonLine(this.cfg.workerOutboxFile, event);
-    await this.audit("worker_instruction_acknowledged", event);
-    return event;
+    return await this.workerService.acknowledgeInstruction(params);
   }
 
   async getOverview(): Promise<SupervisorOverview> {
@@ -863,90 +543,27 @@ export class ProjectSupervisor {
     targetWorker?: string;
     approve?: boolean;
   }): Promise<SupervisorInstruction> {
-    const text = params.instruction.trim();
-    if (!text) throw new Error("Instruction cannot be empty.");
-    const createdAt = nowIso();
-    const worker = params.targetWorker ? null : await this.getWorkerState().catch(() => null);
-    const instruction: SupervisorInstruction = {
-      id: toId(`${this.cfg.projectId}:${createdAt}:${Math.random()}`),
-      projectId: this.cfg.projectId,
-      targetWorker: params.targetWorker?.trim() || (worker?.source === "file" ? worker.workerId : this.cfg.defaultWorkerId),
-      createdBy: params.createdBy ?? "human",
-      status: params.approve ? "approved" : "pending",
-      instruction: text,
-      source: params.source ?? "mobile",
-      createdAt,
-      approvedAt: params.approve ? createdAt : undefined
-    };
-    const state = await this.readState();
-    state.instructions = [...state.instructions, instruction].slice(-this.cfg.maxInstructions);
-    await this.writeState(state);
-    await this.audit("instruction_created", instruction);
-    if (params.approve) return await this.dispatchInstruction(instruction.id);
-    return instruction;
+    return await this.instructionService.create(params);
   }
 
   async approveLatestPendingInstruction(): Promise<SupervisorInstruction> {
-    const pending = await this.listInstructions("pending");
-    const latest = pending.at(-1);
-    if (!latest) throw new Error("No pending instruction to approve.");
-    return await this.approveInstruction(latest.id);
+    return await this.instructionService.approveLatest();
   }
 
   async approveInstruction(id: string): Promise<SupervisorInstruction> {
-    const state = await this.readState();
-    const instruction = state.instructions.find((entry) => entry.id === id);
-    if (!instruction) throw new Error(`Instruction "${id}" was not found.`);
-    if (instruction.status === "rejected") throw new Error(`Instruction "${id}" was already rejected.`);
-    if (instruction.status === "dispatched") return instruction;
-    instruction.status = "approved";
-    instruction.approvedAt = instruction.approvedAt ?? nowIso();
-    await this.writeState(state);
-    await this.audit("instruction_approved", instruction);
-    return await this.dispatchInstruction(id);
+    return await this.instructionService.approve(id);
   }
 
   async rejectLatestPendingInstruction(reason?: string): Promise<SupervisorInstruction> {
-    const pending = await this.listInstructions("pending");
-    const latest = pending.at(-1);
-    if (!latest) throw new Error("No pending instruction to reject.");
-    return await this.rejectInstruction(latest.id, reason);
+    return await this.instructionService.rejectLatest(reason);
   }
 
   async rejectInstruction(id: string, reason?: string): Promise<SupervisorInstruction> {
-    const state = await this.readState();
-    const instruction = state.instructions.find((entry) => entry.id === id);
-    if (!instruction) throw new Error(`Instruction "${id}" was not found.`);
-    if (instruction.status === "dispatched") throw new Error(`Instruction "${id}" was already dispatched.`);
-    instruction.status = "rejected";
-    instruction.rejectedAt = nowIso();
-    instruction.rejectReason = reason?.trim() || undefined;
-    await this.writeState(state);
-    await this.audit("instruction_rejected", instruction);
-    return instruction;
+    return await this.instructionService.reject(id, reason);
   }
 
   async dispatchInstruction(id: string): Promise<SupervisorInstruction> {
-    const state = await this.readState();
-    const instruction = state.instructions.find((entry) => entry.id === id);
-    if (!instruction) throw new Error(`Instruction "${id}" was not found.`);
-    if (instruction.status === "dispatched") return instruction;
-    if (instruction.status !== "approved") throw new Error(`Instruction "${id}" is not approved.`);
-    const dispatchedAt = nowIso();
-    instruction.status = "dispatched";
-    instruction.dispatchedAt = dispatchedAt;
-    await appendJsonLine(this.cfg.workerInboxFile, {
-      id: instruction.id,
-      projectId: instruction.projectId,
-      targetWorker: instruction.targetWorker,
-      instruction: instruction.instruction,
-      createdAt: instruction.createdAt,
-      approvedAt: instruction.approvedAt,
-      dispatchedAt
-    });
-    await this.writeState(state);
-    await this.audit("instruction_dispatched", instruction);
-    return instruction;
+    return await this.instructionService.dispatch(id);
   }
 
   async runAllowedCommand(name: string): Promise<TaskRecord> {

@@ -235,6 +235,14 @@ export type SupervisorSnapshot = {
   projects: ProjectRegistry;
 };
 
+export type SupervisorState = {
+  token?: string;
+  snapshots: SupervisorSnapshot[];
+  tasks: TaskRecord[];
+  instructions: SupervisorInstruction[];
+  notifications: SupervisorNotification[];
+};
+
 export type SupervisorOverview = {
   activeProject: ProjectRegistryEntry;
   snapshot: SupervisorSnapshot;
@@ -251,4 +259,3 @@ export type SupervisorOverview = {
   quotaLogCursors: QuotaLogCursor[];
   panelUrl: string;
 };
-

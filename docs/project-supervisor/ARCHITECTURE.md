@@ -24,7 +24,8 @@
 
 ### Application/Core Layer
 
-- `src/supervisor.ts` owns project scanning orchestration, worker state, instructions, notifications, active-project routing, and the public core classes.
+- `src/supervisor.ts` owns project scanning orchestration, active-project routing, and the backward-compatible public core classes.
+- `src/supervisor-services.ts` owns worker state/inbox/outbox behavior, supervisor instruction lifecycle, and notification delivery/acknowledgement behavior.
 - `src/quota.ts` owns Codex account metadata, quota windows, observations, log-source metadata, cursors, and quota notifications.
 
 ### Ingestion Adapters
@@ -64,7 +65,7 @@ No major feature should be added to `supervisor.ts` until these stages are compl
 1. Extract shared exported types and normalized configuration.
 2. Extract project scanning and health/signal evaluation.
 3. ~~Replace duplicated `ProjectSupervisor`/`ProjectSupervisorHub` HTTP route branches with one controller/router.~~ Completed in Phase 13.
-4. Extract instruction, worker, and notification services from the core class.
+4. ~~Extract instruction, worker, and notification services from the core class.~~ Completed in Phase 13.
 5. Introduce a storage interface before migrating project state from JSON to SQLite.
 
 Each stage must preserve the public API, OpenClaw command surface, standalone CLI, file protocol, and full test suite.

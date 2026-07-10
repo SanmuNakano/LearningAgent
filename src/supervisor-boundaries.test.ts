@@ -42,4 +42,16 @@ describe("supervisor architecture boundaries", () => {
     expect(controller).toContain('parsed.pathname === "/api/worker-heartbeat"');
     expect(controller).toContain('parsed.pathname === "/api/quotas/observe"');
   });
+
+  it("keeps worker, instruction, and notification lifecycle logic in services", async () => {
+    const [core, services] = await Promise.all([
+      readFile(new URL("./supervisor.ts", import.meta.url), "utf-8"),
+      readFile(new URL("./supervisor-services.ts", import.meta.url), "utf-8")
+    ]);
+    expect(core).not.toContain('instruction.status = "approved"');
+    expect(core).not.toContain('notification.status = "acknowledged"');
+    expect(services).toContain("export class WorkerService");
+    expect(services).toContain("export class InstructionService");
+    expect(services).toContain("export class NotificationService");
+  });
 });

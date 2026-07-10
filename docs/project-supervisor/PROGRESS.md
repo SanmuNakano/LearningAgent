@@ -91,3 +91,7 @@
 - Replaced the duplicated single-project and hub HTTP endpoint branches with one shared supervisor controller.
 - Preserved single-project response shapes, hub-only project/quota routes, authentication, dashboard prefix handling, and the 1 MiB body limit.
 - Added an architecture guard test so endpoint routing cannot drift back into both core classes; the suite is now 65 passing tests.
+- Created a checkpoint commit for the completed Phase 9-13 work before changing service ownership.
+- Extracted worker heartbeat/inbox/outbox behavior, instruction approval/dispatch behavior, and notification delivery/acknowledgement behavior into dedicated services.
+- Kept the `ProjectSupervisor` public API as a compatibility facade and added a boundary guard against lifecycle logic moving back into the core class.
+- Verified the service extraction with `npm run check`; the suite is now 66 passing tests.
