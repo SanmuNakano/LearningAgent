@@ -32,6 +32,7 @@ export { normalizeSupervisorConfig } from "./supervisor-config.js";
 import { checkPort, readLogTails, readPackageScripts, scanFiles, scanGit } from "./project-scanner.js";
 import {
   buildNextActions,
+  buildProjectReview,
   buildRisks,
   buildSupervisionSignals,
   buildWorkerRisks,
@@ -416,7 +417,8 @@ export class ProjectSupervisor {
       .filter((signal) => signal.severity !== "info")
       .map((signal) => `${signal.title}: ${signal.detail}`);
     const risks = [...projectRisk.risks, ...workerRisks, ...signalRisks];
-    const nextActions = buildNextActions({ projectHealth: projectRisk.health, git, tasks, worker, instructions });
+    const review = buildProjectReview({ git, tasks, logTails });
+    const nextActions = buildNextActions({ projectHealth: projectRisk.health, git, tasks, worker, instructions, review });
     const changed = git.available ? `${git.changedFiles ?? 0} git change(s)` : "git unavailable";
     const summary = `${health.toUpperCase()}: ${changed}, ${fileScan.recent.length} recently touched file(s), ${tasks.filter((task) => task.status === "running").length} running task(s), ${tasks.filter((task) => task.status === "failed" || task.status === "timeout").length} failed task(s), worker ${worker.status}.`;
     const snapshot: SupervisorSnapshot = {
@@ -436,7 +438,8 @@ export class ProjectSupervisor {
       instructions: instructions.slice(-20),
       nextActions,
       signals,
-      projects: registry
+      projects: registry,
+      review
     };
     state.snapshots.push(snapshot);
     state.tasks = tasks.filter((task, index, list) => list.findIndex((other) => other.id === task.id) === index).slice(-this.cfg.maxHistory);
@@ -651,6 +654,7 @@ export class ProjectSupervisor {
       `Project: ${snapshot.projectDir}`,
       `Scanned: ${snapshot.scannedAt}`,
       `Git: ${git}`,
+      `Review: ${snapshot.review?.readiness ?? "unavailable"} - ${snapshot.review?.recommendation ?? "refresh scan"}`,
       `Worker: ${worker}`,
       `Pending instructions: ${pending.length}`,
       `Open alerts: ${notifications.length}`,

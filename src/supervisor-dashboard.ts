@@ -49,6 +49,7 @@ export function renderDashboardHtml(routePrefix: string): string {
       <div class="panel"><div class="metric">Tasks</div><div id="tasks" class="value">-</div></div>
     </section>
     <section class="panel"><h2>Summary</h2><pre id="summary"></pre></section>
+    <section class="panel"><h2>Change & Failure Review</h2><pre id="reviewSummary"></pre></section>
     <section class="panel"><h2>Risks</h2><pre id="risks"></pre></section>
     <section class="panel"><h2>Signals</h2><pre id="signals"></pre></section>
     <section class="panel">
@@ -195,6 +196,15 @@ export function renderDashboardHtml(routePrefix: string): string {
       document.getElementById("recent").textContent = s.fileScan.recent.length;
       document.getElementById("tasks").textContent = s.tasks.length;
       document.getElementById("summary").textContent = s.summary + "\\nGit: " + (s.git.available ? s.git.status || "clean" : s.git.error);
+      const review = s.review || { readiness: "review_required", summary: "Review data unavailable in this snapshot.", recommendation: "Refresh the project scan.", failedTasks: [], logFindings: [] };
+      document.getElementById("reviewSummary").textContent = [
+        "Decision: " + review.readiness,
+        review.summary,
+        "Recommendation: " + review.recommendation,
+        "Diff stat: " + (s.git.diffStat || "(none)"),
+        "Failed tasks: " + (review.failedTasks.length ? review.failedTasks.map(x => x.name + ": " + x.excerpt).join("\\n- ") : "none"),
+        "Log findings: " + (review.logFindings.length ? review.logFindings.map(x => x.path + ": " + x.excerpt).join("\\n- ") : "none")
+      ].join("\\n");
       document.getElementById("risks").textContent = s.risks.length ? s.risks.map(r => "- " + r).join("\\n") : "- none";
       document.getElementById("signals").textContent = (data.signals || []).length ? data.signals.map(x => "- [" + x.severity + "] " + x.title + ": " + x.detail + (x.command ? " (" + x.command + ")" : "")).join("\\n") : "- none";
       document.getElementById("notifications").innerHTML = notificationRows(data.notifications || []);

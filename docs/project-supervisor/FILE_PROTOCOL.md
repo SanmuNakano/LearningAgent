@@ -254,6 +254,18 @@ Current signal examples:
 
 Critical signals promote overall project health to `blocked`. Watch signals promote an otherwise healthy project to `watch`.
 
+## Change And Failure Review
+
+Each new snapshot includes a deterministic `review` object. It does not call an LLM or persist full diffs again. It combines:
+
+- Git changed-file status, staged/untracked counts, and `git diff --stat HEAD`;
+- the latest result for each supervised command, so a successful retry clears an older failure;
+- short error-focused excerpts from failed task output and configured log tails;
+- one readiness decision: `clean`, `fix_required`, `review_required`, or `ready_to_commit`;
+- a recommended next action for the human or worker AI.
+
+Full command logs and configured log tails retain their existing limits. Review excerpts are deliberately short and are derived from data already present in the snapshot.
+
 ## Notifications
 
 Signals with severity `watch` or `critical` create notifications. Informational signals stay visible in status and overview but do not alert.

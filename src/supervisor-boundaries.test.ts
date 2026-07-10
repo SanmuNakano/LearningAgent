@@ -9,6 +9,7 @@ describe("supervisor architecture boundaries", () => {
     const html = renderDashboardHtml("/plugins/project-supervisor");
     expect(html).toContain('const apiBase = "/plugins/project-supervisor"');
     expect(html).toContain("Recent Instruction Execution");
+    expect(html).toContain("Change & Failure Review");
     expect(html).toContain("awaiting_ack");
     expect(html).not.toContain("project_supervisor_token");
   });

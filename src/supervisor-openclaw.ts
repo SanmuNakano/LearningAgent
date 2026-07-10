@@ -179,6 +179,18 @@ export function registerProjectSupervisor(api: any): void {
             `Health: ${overview.snapshot.health}`,
             `Worker: ${overview.snapshot.worker.workerId}:${overview.snapshot.worker.status}`,
             `Step: ${overview.snapshot.worker.currentStep ?? "(not reported)"}`,
+            `Review decision: ${overview.snapshot.review?.readiness ?? "unavailable"}`,
+            `Change summary: ${overview.snapshot.review?.summary ?? "refresh scan"}`,
+            `Recommendation: ${overview.snapshot.review?.recommendation ?? "refresh scan"}`,
+            `Diff stat: ${overview.snapshot.git.diffStat ?? "(none)"}`,
+            "Failed task excerpts:",
+            ...(overview.snapshot.review?.failedTasks.length
+              ? overview.snapshot.review.failedTasks.map((task) => `- ${task.name}/${task.status}: ${task.excerpt}`)
+              : ["- none"]),
+            "Log findings:",
+            ...(overview.snapshot.review?.logFindings.length
+              ? overview.snapshot.review.logFindings.map((finding) => `- ${finding.path}: ${finding.excerpt}`)
+              : ["- none"]),
             "Signals:",
             ...(overview.signals.length > 0
               ? overview.signals.map((signal) => `- [${signal.severity}] ${signal.title}: ${signal.detail}${signal.command ? ` (${signal.command})` : ""}`)

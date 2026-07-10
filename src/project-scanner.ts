@@ -128,14 +128,15 @@ export async function scanGit(projectDir: string): Promise<GitSummary> {
   const inside = await runCapture("git rev-parse --is-inside-work-tree", projectDir);
   if (!inside.ok) return { available: false, error: (inside.error ?? inside.stderr ?? "git unavailable").trim().slice(0, 180) };
 
-  const [branch, status, lastCommit, upstream, divergence] = await Promise.all([
+  const [branch, status, lastCommit, upstream, divergence, diffStat] = await Promise.all([
     runCapture("git branch --show-current", projectDir),
     runCapture("git status --short", projectDir),
     runCapture("git log -1 --pretty=format:%h%x20%s", projectDir),
     runCapture("git rev-parse --abbrev-ref --symbolic-full-name @{u}", projectDir),
-    runCapture("git rev-list --left-right --count @{u}...HEAD", projectDir)
+    runCapture("git rev-list --left-right --count @{u}...HEAD", projectDir),
+    runCapture("git diff --stat HEAD", projectDir)
   ]);
-  const statusText = status.stdout.trim();
+  const { statusText, changes } = parseGitStatusOutput(status.stdout);
   const divergenceParts = divergence.ok ? divergence.stdout.trim().split(/\s+/).map((part) => Number(part)) : [];
   const behindBy = Number.isFinite(divergenceParts[0]) ? divergenceParts[0] : undefined;
   const aheadBy = Number.isFinite(divergenceParts[1]) ? divergenceParts[1] : undefined;
@@ -144,11 +145,24 @@ export async function scanGit(projectDir: string): Promise<GitSummary> {
     branch: branch.stdout.trim() || undefined,
     upstream: upstream.ok ? upstream.stdout.trim() || undefined : undefined,
     status: statusText,
-    changedFiles: statusText ? statusText.split(/\r?\n/).filter(Boolean).length : 0,
+    changedFiles: changes.length,
+    changes,
     aheadBy,
     behindBy,
-    lastCommit: lastCommit.stdout.trim() || undefined
+    lastCommit: lastCommit.stdout.trim() || undefined,
+    diffStat: diffStat.ok ? diffStat.stdout.trim() || undefined : undefined
   };
+}
+
+export function parseGitStatusOutput(output: string): { statusText: string; changes: NonNullable<GitSummary["changes"]> } {
+  const statusText = output.trimEnd();
+  const changes = statusText.split(/\r?\n/).filter(Boolean).map((line) => {
+    const code = line.slice(0, 2);
+    const rawPath = line.slice(3).trim();
+    const renamedPath = rawPath.includes(" -> ") ? rawPath.split(" -> ").at(-1)! : rawPath;
+    return { path: renamedPath.replace(/^"|"$/g, ""), status: code, staged: code[0] !== " " && code[0] !== "?", untracked: code === "??" };
+  });
+  return { statusText, changes };
 }
 
 export async function readPackageScripts(projectDir: string): Promise<string[]> {

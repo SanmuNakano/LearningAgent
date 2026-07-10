@@ -109,3 +109,13 @@
 - Added recent instruction execution state to the dashboard and mobile `/supervise review` output.
 - Prioritized critical and watch signals before informational signals when snapshot limits are applied.
 - Verified Phase 14 with `npm run check`; the suite is now 73 passing tests.
+
+## 2026-07-10 - Phase 15
+
+- Added structured Git change collection with per-file status, staged/untracked counts, and tracked diff statistics.
+- Added deterministic project review summaries with `clean`, `fix_required`, `review_required`, and `ready_to_commit` decisions.
+- Added short error-focused excerpts from the latest failed supervised commands and configured log tails.
+- Changed failure decisions to use the latest result per command, so a successful retry clears an older failure and its high-priority action.
+- Added review summaries and recommendations to text status, mobile `/supervise review`, and the dashboard.
+- Fixed first-entry Git porcelain parsing so an unstaged change cannot be misclassified as staged when leading whitespace is significant.
+- Verified Phase 15 with `npm run check`; the suite is now 78 passing tests.

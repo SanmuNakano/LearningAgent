@@ -63,7 +63,20 @@ export type GitSummary = {
   aheadBy?: number;
   behindBy?: number;
   lastCommit?: string;
+  diffStat?: string;
+  changes?: Array<{ path: string; status: string; staged: boolean; untracked: boolean }>;
   error?: string;
+};
+
+export type ProjectReviewSummary = {
+  readiness: "clean" | "fix_required" | "review_required" | "ready_to_commit";
+  summary: string;
+  recommendation: string;
+  changedFiles: number;
+  stagedFiles: number;
+  untrackedFiles: number;
+  failedTasks: Array<{ name: string; status: TaskStatus; finishedAt?: string; excerpt: string }>;
+  logFindings: Array<{ path: string; excerpt: string }>;
 };
 
 export type PortSummary = {
@@ -235,6 +248,7 @@ export type SupervisorSnapshot = {
   nextActions: SupervisorNextAction[];
   signals: SupervisionSignal[];
   projects: ProjectRegistry;
+  review?: ProjectReviewSummary;
 };
 
 export type SupervisorState = {

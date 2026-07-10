@@ -27,6 +27,7 @@ What it monitors:
 - risk state: `ok`, `watch`, or `blocked`
 - structured supervision signals such as stale worker progress, repeated command failures, pending human decisions, local changes ready for review, and git ahead/behind state
 - approved-instruction compliance tracking for acknowledgement timeout, stalled execution, failure, and explicit ignore events
+- deterministic Git diff-stat and failure-log review with fix/review/commit readiness recommendations
 
 Safe controls:
 

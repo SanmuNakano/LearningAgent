@@ -1,11 +1,54 @@
 import { createHash } from "node:crypto";
 import type {
-  FileScanSummary, GitSummary, PortSummary, SupervisionSignal, SupervisorHealth,
+  FileScanSummary, GitSummary, PortSummary, ProjectReviewSummary, SupervisionSignal, SupervisorHealth,
   SupervisorInstruction, SupervisorNextAction, SupervisorNotification, TaskRecord, WorkerState
 } from "./supervisor-types.js";
 
 function nowIso(): string { return new Date().toISOString(); }
 function toId(input: string): string { return createHash("sha256").update(input).digest("hex").slice(0, 16); }
+
+function latestFinishedTasksByName(tasks: TaskRecord[]): TaskRecord[] {
+  const latest = new Map<string, TaskRecord>();
+  for (const task of tasks) if (task.status !== "running") latest.set(task.name, task);
+  return [...latest.values()];
+}
+
+function errorExcerpt(text: string, maxChars = 600): string {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const matching = lines.filter((line) => /error|fail|exception|traceback|timeout|not found/i.test(line));
+  const selected = (matching.length > 0 ? matching : lines).slice(-4).join(" | ");
+  return selected.length <= maxChars ? selected : selected.slice(selected.length - maxChars);
+}
+
+export function buildProjectReview(params: {
+  git: GitSummary;
+  tasks: TaskRecord[];
+  logTails: Array<{ path: string; text: string; error?: string }>;
+}): ProjectReviewSummary {
+  const changes = params.git.changes ?? [];
+  const changedFiles = params.git.changedFiles ?? changes.length;
+  const failedTasks = latestFinishedTasksByName(params.tasks).filter((task) => task.status === "failed" || task.status === "timeout").slice(-3).reverse()
+    .map((task) => ({ name: task.name, status: task.status, finishedAt: task.finishedAt, excerpt: errorExcerpt(task.log) }));
+  const logFindings = params.logTails.flatMap((log) => {
+    if (log.error) return [{ path: log.path, excerpt: log.error }];
+    return /error|fail|exception|traceback|timeout/i.test(log.text) ? [{ path: log.path, excerpt: errorExcerpt(log.text) }] : [];
+  }).slice(0, 4);
+  const stagedFiles = changes.filter((change) => change.staged).length;
+  const untrackedFiles = changes.filter((change) => change.untracked).length;
+  const runningTasks = params.tasks.some((task) => task.status === "running");
+  const latestFinished = params.tasks.filter((task) => task.status !== "running").at(-1);
+  const verified = latestFinished?.status === "ok" && /check|test|build/i.test(latestFinished.name);
+  const readiness: ProjectReviewSummary["readiness"] = failedTasks.length > 0
+    ? "fix_required"
+    : changedFiles === 0 ? "clean" : !runningTasks && verified ? "ready_to_commit" : "review_required";
+  const recommendation = readiness === "fix_required"
+    ? `Inspect and fix the latest failed supervised task (${failedTasks[0].name}) before committing.`
+    : readiness === "ready_to_commit" ? "Review the diff, then commit and push the verified changes."
+      : readiness === "review_required" ? (runningTasks ? "Wait for the running task, then review the diff and results." : "Review the diff and run the configured check before committing.")
+        : "No local changes require action.";
+  const summary = `${changedFiles} changed file(s): ${stagedFiles} staged, ${untrackedFiles} untracked; ${failedTasks.length} recent failed supervised task(s).`;
+  return { readiness, summary, recommendation, changedFiles, stagedFiles, untrackedFiles, failedTasks, logFindings };
+}
 
 export function buildRisks(params: {
   git: GitSummary;
@@ -15,7 +58,7 @@ export function buildRisks(params: {
   staleAfterMs: number;
 }): { health: SupervisorHealth; risks: string[]; summary: string } {
   const risks: string[] = [];
-  const failed = params.tasks.filter((task) => task.status === "failed" || task.status === "timeout");
+  const failed = latestFinishedTasksByName(params.tasks).filter((task) => task.status === "failed" || task.status === "timeout");
   const running = params.tasks.filter((task) => task.status === "running");
   const lastActivity = params.fileScan.newest[0] ? Date.parse(params.fileScan.newest[0].modifiedAt) : 0;
   const stale = lastActivity > 0 && Date.now() - lastActivity > params.staleAfterMs;
@@ -327,9 +370,10 @@ export function buildNextActions(params: {
   tasks: TaskRecord[];
   worker: WorkerState;
   instructions: SupervisorInstruction[];
+  review?: ProjectReviewSummary;
 }): SupervisorNextAction[] {
   const actions: SupervisorNextAction[] = [];
-  const failed = params.tasks.filter((task) => task.status === "failed" || task.status === "timeout");
+  const failed = latestFinishedTasksByName(params.tasks).filter((task) => task.status === "failed" || task.status === "timeout");
   const running = params.tasks.filter((task) => task.status === "running");
   const pending = params.instructions.filter((instruction) => instruction.status === "pending");
   const failedInstructions = params.instructions.filter((instruction) => instruction.workerStatus === "failed");
@@ -395,11 +439,11 @@ export function buildNextActions(params: {
 
   if (params.git.available && (params.git.changedFiles ?? 0) > 0) {
     actions.push({
-      id: "review-git-changes",
+      id: params.review?.readiness === "ready_to_commit" ? "commit-verified-changes" : "review-git-changes",
       priority: "medium",
-      title: "Review local Git changes",
-      detail: `${params.git.changedFiles} changed file(s) are present. Run checks before committing or pushing.`,
-      command: "/supervise run test"
+      title: params.review?.readiness === "ready_to_commit" ? "Commit verified local changes" : "Review local Git changes",
+      detail: params.review?.recommendation ?? `${params.git.changedFiles} changed file(s) are present. Run checks before committing or pushing.`,
+      command: params.review?.readiness === "ready_to_commit" ? "/supervise review" : "/supervise run check"
     });
   }
 
